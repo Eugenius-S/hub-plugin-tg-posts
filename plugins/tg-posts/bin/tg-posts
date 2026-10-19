@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Посты владельцу в Telegram (факт хаба telegram.post): по сообщению на пост — картинка, подпись, кнопки.
+"""Посты владельцу в Telegram: команды кладут посты в очередь плагина, а он держит в Telegram ровно один неразобранный
+пост — следующий уходит, когда этот закрыт кнопкой ❤️ или 👎.
 
-    tg-posts drafts <файл.md> [--only 3,5] [--image N=<путь> …]   варианты постов из «## N. Название»; реплай
-                                                                   владельца на пост придёт этой сессии с пометкой поста
-    tg-posts deck [--count 10] [--url <адрес колоды>]             карточки колоды с ❤️ 👎; нажатия и реплаи плагин
+    tg-posts drafts <файл.md> [--only 3,5] [--image N=<путь> …]   варианты постов из «## N. Название» в очередь; реплай
+                                                                   владельца на пост (докрутка) придёт этой сессии, а
+                                                                   новая версия — та же команда с --only N: заменяет пост
+    tg-posts deck [--count 10] [--url <адрес колоды>]             карточки колоды в очередь; ❤️ 👎 и реплаи плагин
                                                                    сам отдаёт серверу колоды, без хода сессии
+    tg-posts status                                               что открыто и сколько в очереди
+    tg-posts clear                                                сбросить очередь и открытый пост
 Только stdlib: сессия зовёт его как есть, без кода хаба на пути."""
 import argparse
 import json
@@ -17,22 +21,30 @@ import urllib.request
 import uuid
 
 EXT = "tg-posts"   # имя расширения в факте: по нему процесс плагина узнаёт свои нажатия и реплаи
-LIKE, NOPE = "❤️", "👎"
 _last = 0
 
 
-def put(state, data):
-    """Факт в ящик хаба (как core.spool.put): атомарно, порядок — по имени."""
+def inbox(state):
+    return os.path.join(state, EXT, "inbox")
+
+
+def put(state, cmd):
+    """Команда плагину в его ящик (атомарно, порядок — по имени): посты и сброс очереди."""
     global _last
-    d = os.path.join(state, "spool")
+    d = inbox(state)
     os.makedirs(d, exist_ok=True)
     _last = max(time.time_ns(), _last + 1)
     name = f"{_last:020d}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
     tmp = os.path.join(d, "." + name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"type": "telegram.post", "entity": None, "data": data, "src": f"ext:{EXT}", "ts": time.time()},
-                  f, ensure_ascii=False)
+        json.dump(cmd, f, ensure_ascii=False)
     os.replace(tmp, os.path.join(d, name + ".json"))
+
+
+def enqueue(state, items):
+    put(state, {"op": "post", "items": items})
+    return "" if os.path.isfile(os.path.join(state, EXT, "state.json")) else \
+        " (состояния плагина нет — процесс плагина не запущен? без него посты не уйдут)"
 
 
 def drafts(text):
@@ -67,17 +79,19 @@ def cmd_drafts(a, state):
     session = a.session or os.environ.get("HUB_SESSION")
     if not session:
         sys.exit("нужна сессия: --session <имя> (в сессии хаба — сама)")
-    sent = 0
+    items = []
     for n, title, body in posts:
         if only and n not in only:
             continue
-        data = {"text": f"{n}. {title}\n\n{body}".strip(), "ref": f"{os.path.basename(path)} #{n} {title}",
-                "session": session}
+        item = {"kind": "drafts", "key": f"{path}#{n}", "text": f"{n}. {title}\n\n{body}".strip(),
+                "ref": f"{os.path.basename(path)} #{n} {title}", "session": session, "file": path, "n": n, "title": title}
         if n in pics:
-            data["path"] = pics[n]
-        put(state, data)
-        sent += 1
-    print(f"в Telegram: {sent} пост(ов) из {os.path.basename(path)}; реплай владельца придёт сюда с пометкой поста")
+            item["path"] = pics[n]
+        items.append(item)
+    warn = enqueue(state, items)
+    print(f"в очередь: {len(items)} пост(ов) из {os.path.basename(path)}{warn}; в Telegram идёт по одному — следующий после "
+          "❤️ или 👎. Реплай владельца (докрутка) придёт сюда с пометкой поста: пришли новую версию той же командой с "
+          "--only N — она заменит пост")
 
 
 def deck_url(a, state):
@@ -102,7 +116,7 @@ def fetch(url):
 
 def card_post(c, pic=None):
     text = "\n\n".join(x.strip() for x in (c.get("caption"), c.get("caption_ru")) if x and x.strip())
-    data = {"text": text or c["id"], "ref": c["id"], "buttons": [LIKE, NOPE]}
+    data = {"kind": "deck", "key": c["id"], "text": text or c["id"], "ref": c["id"]}
     if pic:
         data["path"] = pic
     return data
@@ -138,9 +152,30 @@ def cmd_deck(a, state):
         sys.exit(f"колода {url} не отвечает: {e}")
     cards = (got.get("cards") if isinstance(got, dict) else got) or []   # там только неоценённые
     todo = [c for c in cards if c.get("id")][: a.count]
-    for c in todo:
-        put(state, card_post(c, thumb(url, c, state)))
-    print(f"в Telegram: {len(todo)} из {len(cards)} карточек колоды {url}; ❤️ 👎 и реплаи плагин отдаст колоде сам")
+    warn = enqueue(state, [card_post(c, thumb(url, c, state)) for c in todo])
+    print(f"в очередь: {len(todo)} из {len(cards)} карточек колоды {url}{warn}; в Telegram идёт по одному — следующая после "
+          "❤️ или 👎, их и реплаи плагин отдаст колоде сам")
+
+
+def cmd_status(a, state):
+    try:
+        with open(os.path.join(state, EXT, "state.json"), encoding="utf-8") as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        sys.exit("состояния плагина нет: процесс плагина не запущен или ещё ничего не получал")
+    o, posts = st.get("open"), st.get("posts") or []
+    new = sum(n.endswith(".json") for n in os.listdir(inbox(state))) if os.path.isdir(inbox(state)) else 0
+    print("открыт в Telegram: " + (f"{o['ref']} (с {time.strftime('%d.%m %H:%M', time.localtime(o['at']))})" if o else "ничего"))
+    print(f"в очереди: {len(posts)}" + "".join(f"\n  {p['ref']}" for p in posts[:10]) + ("\n  …" if len(posts) > 10 else ""))
+    if new:
+        print(f"ещё не разобрано плагином: {new} команд(ы)")
+    if st.get("jobs"):
+        print(f"оценок ждёт колоду: {len(st['jobs'])}")
+
+
+def cmd_clear(a, state):
+    put(state, {"op": "clear"})
+    print("очередь и открытый пост сброшены (сообщения, уже висящие в Telegram, остаются)")
 
 
 def main(argv=None):
@@ -154,11 +189,13 @@ def main(argv=None):
     k = sub.add_parser("deck")
     k.add_argument("--count", type=int, default=10)
     k.add_argument("--url")
+    sub.add_parser("status")
+    sub.add_parser("clear")
     a = p.parse_args(argv)
     state = os.environ.get("HUB_STATE_DIR")
     if not state:
         sys.exit("нужен HUB_STATE_DIR (в сессии хаба он есть)")
-    (cmd_drafts if a.cmd == "drafts" else cmd_deck)(a, state)
+    {"drafts": cmd_drafts, "deck": cmd_deck, "status": cmd_status, "clear": cmd_clear}[a.cmd](a, state)
 
 
 if __name__ == "__main__":

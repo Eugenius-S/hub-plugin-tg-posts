@@ -1,7 +1,9 @@
-"""CLI кладёт посты фактом telegram.post в ящик; процесс отдаёт нажатия и реплаи колоде по порядку, с повтором, пока
-она лежит, и не повторяет их после перезапуска."""
+"""CLI кладёт посты и команды в ящик плагина; процесс шлёт в Telegram один пост (telegram.post), следующий — после ❤️ / 👎,
+закрытие колоды отдаёт ей по порядку, с повтором, пока она лежит, и не повторяет после перезапуска."""
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -98,7 +100,15 @@ class Base(unittest.TestCase):
 
 
 class Cli(Base):
-    def test_drafts_become_one_post_per_section_for_this_session(self):
+    def inbox(self):
+        d = os.path.join(self.dir, "tg-posts", "inbox")
+        out = []
+        for n in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            with open(os.path.join(d, n), encoding="utf-8") as f:
+                out.append(json.load(f))
+        return out
+
+    def test_drafts_become_one_queued_post_per_section_for_this_session(self):
         md = os.path.join(self.dir, "drafts-2026-10-19.md")
         with open(md, "w", encoding="utf-8") as f:
             f.write(DRAFTS)
@@ -106,29 +116,44 @@ class Cli(Base):
         with open(pic, "wb") as f:
             f.write(b"png")
         cli.main(["drafts", md, "--image", f"2={pic}", "--only", "1,2"])
-        got = self.taken()
-        self.assertEqual([(e["type"], e["src"]) for e in got], [("telegram.post", "ext:tg-posts")] * 2)
-        first, second = (e["data"] for e in got)
+        (cmd,) = self.inbox()
+        self.assertEqual(self.taken(), [])   # в Telegram CLI сам не шлёт — только в очередь плагина
+        first, second = cmd["items"]
         self.assertEqual(first["text"], "1. Первый\n\nText one.\nПеревод.")   # без хвостового «---»
-        self.assertEqual(first["ref"], "drafts-2026-10-19.md #1 Первый")
-        self.assertEqual(first["session"], "smm")
+        self.assertEqual((first["kind"], first["key"], first["n"], first["title"]), ("drafts", f"{md}#1", 1, "Первый"))
+        self.assertEqual((first["ref"], first["session"], first["file"]), ("drafts-2026-10-19.md #1 Первый", "smm", md))
         self.assertNotIn("path", first)
         self.assertEqual((second["ref"], second["path"]), ("drafts-2026-10-19.md #2 Второй пост", pic))
 
-    def test_deck_sends_unrated_cards_with_buttons_and_their_thumbs(self):
+    def test_deck_queues_unrated_cards_with_their_thumbs(self):
         deck = Deck([{"id": "reddit:t3_a/b", "caption": "Line\nmore", "caption_ru": "Строка", "thumb": "a.thumb.jpg"},
                      {"id": "arena:2", "caption": "Two"}])
         try:
             cli.main(["deck", "--url", deck.url, "--count", "5"])
         finally:
             deck.server.shutdown()
-        a, b = (e["data"] for e in self.taken())
-        self.assertEqual((a["ref"], a["text"], a["buttons"]), ("reddit:t3_a/b", "Line\nmore\n\nСтрока", ["❤️", "👎"]))
+        (cmd,) = self.inbox()
+        a, b = cmd["items"]
+        self.assertEqual((a["kind"], a["key"], a["ref"], a["text"]), ("deck", "reddit:t3_a/b", "reddit:t3_a/b", "Line\nmore\n\nСтрока"))
         self.assertTrue(a["path"].startswith(self.dir))
         with open(a["path"], "rb") as f:
             self.assertTrue(f.read().endswith(b"thumb"))
         self.assertNotIn("path", b)
         self.assertNotIn("session", a)   # нажатия и реплаи — плагину, не сессии
+
+    def test_status_and_clear(self):
+        with self.assertRaises(SystemExit):
+            cli.main(["status"])   # плагин ещё не запускался
+        os.makedirs(os.path.join(self.dir, "tg-posts"))
+        with open(os.path.join(self.dir, "tg-posts", "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"open": {"ref": "a #1 Один", "at": 1000.0}, "posts": [{"ref": "a #2 Два"}], "jobs": []}, f)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.main(["status"])
+        self.assertIn("открыт в Telegram: a #1 Один", buf.getvalue())
+        self.assertIn("в очереди: 1\n  a #2 Два", buf.getvalue())
+        cli.main(["clear"])
+        self.assertEqual(self.inbox(), [{"op": "clear"}])
 
     def test_deck_url_comes_from_hub_json_of_the_plugin(self):
         with open(os.environ["HUB_CONFIG"], "w", encoding="utf-8") as f:
@@ -185,6 +210,151 @@ class Process(Base):
         self.now += main.RETRY
         p.poll()
         self.assertEqual(len(self.deck.calls), 2)
+
+    def queue(self, *items):
+        cli.put(self.dir, {"op": "post", "items": list(items)})
+
+    @staticmethod
+    def card(i, **kw):
+        return {"kind": "deck", "key": i, "ref": i, "text": f"card {i}", **kw}
+
+    @staticmethod
+    def draft(n, text=None, **kw):
+        return {"kind": "drafts", "key": f"/w/d.md#{n}", "ref": f"d.md #{n} Пост", "text": text or f"{n}. Пост\n\ntext {n}",
+                "session": "smm", "file": "/w/d.md", "n": n, "title": "Пост", **kw}
+
+    def posts(self):
+        return [e["data"] for e in self.taken() if e["type"] == "telegram.post"]
+
+    def test_queue_shows_one_card_and_the_next_only_after_the_button(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.card("c"))
+        p.poll()
+        (a,) = self.posts()
+        self.assertEqual((a["ref"], a["text"], a["buttons"]), ("a", "card a", ["❤️", "👎"]))
+        p.poll()
+        self.assertEqual(self.posts(), [])   # a не закрыта — b ждёт
+        self.press("a", "❤️")
+        p.poll()
+        (b,) = self.posts()
+        self.assertEqual(b["ref"], "b")
+        self.press("b", "👎")
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["c"])
+        self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "like"}),
+                                           ("/api/decide", {"id": "b", "verdict": "reject"})])
+
+    def test_reply_keeps_the_deck_card_open(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.posts()
+        self.j.append("telegram.replied", None, {"ext": "tg-posts", "ref": "a", "text": "автора"}, src="telegram")
+        p.poll()
+        self.assertEqual(self.deck.calls, [("/api/direct", {"id": "a", "text": "автора"})])
+        self.assertEqual(self.posts(), [])   # реплай следующую не открывает
+        self.press("a", "👎")
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["b"])
+
+    def test_draft_button_tells_the_session_and_sends_the_next(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2), self.draft(3))
+        p.poll()
+        got = self.taken()
+        (post,) = [e["data"] for e in got if e["type"] == "telegram.post"]
+        self.assertEqual((post["ref"], post["session"], post["buttons"]), ("d.md #1 Пост", "smm", ["❤️", "👎"]))
+        self.press("d.md #1 Пост", "❤️")
+        p.poll()
+        got = self.taken()
+        (msg,) = [e for e in got if e["type"] == "message.received"]
+        self.assertEqual((msg["src"], msg["data"]["to"], msg["data"]["channel"]), ("ext:tg-posts", "smm", "session"))
+        for word in ("❤️", "1", "«Пост»", "/w/d.md", "принят", "ещё 2"):
+            self.assertIn(word, msg["data"]["text"])
+        self.assertEqual([e["data"]["ref"] for e in got if e["type"] == "telegram.post"], ["d.md #2 Пост"])
+        self.press("d.md #2 Пост", "👎")
+        p.poll()
+        got = self.taken()
+        (msg,) = [e for e in got if e["type"] == "message.received"]
+        self.assertIn("слив", msg["data"]["text"])
+        self.assertEqual(self.deck.calls, [])   # колода к вариантам постов не относится
+
+    def test_draft_reply_does_not_close_and_the_new_version_replaces_the_open_one(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2))
+        p.poll()
+        self.taken()
+        self.j.append("telegram.replied", None, {"ext": "tg-posts", "ref": "d.md #1 Пост", "text": "короче"}, src="telegram")
+        p.poll()
+        self.assertEqual(self.taken(), [])
+        self.queue(self.draft(1, text="1. Пост\n\nкоротко"))
+        p.poll()
+        (v2,) = self.posts()
+        self.assertEqual((v2["ref"], v2["text"]), ("d.md #1 Пост (v2)", "1. Пост\n\nкоротко"))
+        self.press("d.md #1 Пост", "❤️")   # кнопка под старой версией — не в счёт
+        p.poll()
+        self.assertEqual(self.taken(), [])
+        self.press("d.md #1 Пост (v2)", "❤️")
+        p.poll()
+        self.assertEqual([e["data"]["ref"] for e in self.taken() if e["type"] == "telegram.post"], ["d.md #2 Пост"])
+
+    def test_revision_of_a_waiting_post_replaces_it_in_place_and_same_text_is_a_noop(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2, path="/w/2.png"))
+        p.poll()
+        self.taken()
+        self.queue(self.draft(2, text="2. Пост\n\nновый"), self.draft(1))   # у 2 текст другой, у 1 — тот же
+        p.poll()
+        self.assertEqual(self.taken(), [])
+        self.press("d.md #1 Пост", "❤️")
+        p.poll()
+        (two,) = self.posts()
+        self.assertEqual((two["text"], two["path"]), ("2. Пост\n\nновый", "/w/2.png"))   # картинка не потерялась
+
+    def test_state_survives_restart_without_resending(self):
+        self.queue(self.draft(1), self.draft(2))
+        self.plugin().poll()
+        self.taken()
+        p = self.plugin()   # перезапуск: один открыт, второй в очереди
+        p.poll()
+        self.assertEqual(self.taken(), [])
+        self.press("d.md #1 Пост", "❤️")
+        p.poll()
+        self.assertEqual([e["data"]["ref"] for e in self.taken() if e["type"] == "telegram.post"], ["d.md #2 Пост"])
+        self.plugin().poll()
+        self.assertEqual(self.taken(), [])
+
+    def test_clear_drops_queue_and_open_post(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2))
+        p.poll()
+        self.taken()
+        cli.put(self.dir, {"op": "clear"})
+        p.poll()
+        self.press("d.md #1 Пост", "❤️")
+        p.poll()
+        self.assertEqual(self.taken(), [])
+        self.assertEqual((p.st["open"], p.st["posts"]), (None, []))
+
+    def test_same_deck_card_is_not_queued_twice_even_while_its_rating_is_pending(self):
+        p = self.plugin()
+        self.deck.down = True
+        self.queue(self.card("a"), self.card("a"))
+        p.poll()
+        self.assertEqual(len(self.posts()), 1)
+        self.press("a", "❤️")
+        p.poll()   # колода лежит — оценка ждёт повтора
+        self.queue(self.card("a"))
+        p.poll()
+        self.assertEqual(self.taken(), [])
+
+    def test_old_state_with_queue_key_keeps_its_pending_ratings(self):
+        os.makedirs(os.path.join(self.dir, "tg-posts"))
+        job = {"path": "/api/decide", "body": {"id": "x", "verdict": "like"}, "since": 1000.0, "next": 0}
+        with open(os.path.join(self.dir, "tg-posts", "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"seq": 0, "queue": [job]}, f)
+        self.plugin()
+        self.assertEqual(self.deck.calls, [("/api/decide", {"id": "x", "verdict": "like"})])
 
     def test_first_run_starts_from_the_end_of_the_journal(self):
         self.press("old", "❤️")
