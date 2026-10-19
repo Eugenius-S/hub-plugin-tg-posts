@@ -190,6 +190,19 @@ class Cli(Base):
         cli.main(["clear"])
         self.assertEqual(self.inbox(), [{"op": "clear"}])
 
+    def test_status_shows_posts_in_revision_and_the_cli_knows_them(self):
+        os.makedirs(os.path.join(self.dir, "tg-posts"))
+        rev = {"kind": "drafts", "key": "/w/d.md#1", "ref": "d.md #1 Пост", "text": "1. Пост\n\ntext 1", "session": "smm"}
+        with open(os.path.join(self.dir, "tg-posts", "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"open": {"ref": "a #2 Два", "at": 1000.0}, "posts": [], "revising": {"/w/d.md#1": rev}}, f)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.main(["status"])
+        self.assertIn("в докрутке: 1\n  d.md #1 Пост", buf.getvalue())
+        same = {"kind": "drafts", "key": "/w/d.md#1", "text": "1. Пост\n\ntext 1"}
+        new = {"kind": "drafts", "key": "/w/d.md#1", "text": "1. Пост\n\nкоротко"}
+        self.assertEqual(cli.verdicts(self.dir, [same, new]), ["same", "revised"])
+
     def test_deck_url_comes_from_hub_json_of_the_plugin(self):
         with open(os.environ["HUB_CONFIG"], "w", encoding="utf-8") as f:
             json.dump({"extensions": {"Eugenius-S:tg-posts": {"deck": "http://deck:1/"}}}, f)
@@ -314,14 +327,11 @@ class Process(Base):
         self.assertIn("слив", msg["data"]["text"])
         self.assertEqual(self.deck.calls, [])   # колода к вариантам постов не относится
 
-    def test_draft_reply_does_not_close_and_the_new_version_replaces_the_open_one(self):
+    def test_new_version_replaces_the_open_post_that_was_not_replied_to(self):
         p = self.plugin()
         self.queue(self.draft(1), self.draft(2))
         p.poll()
         self.taken()
-        self.j.append("telegram.replied", None, {"ext": "tg-posts", "ref": "d.md #1 Пост", "text": "короче"}, src="telegram")
-        p.poll()
-        self.assertEqual(self.taken(), [])
         self.queue(self.draft(1, text="1. Пост\n\nкоротко"))
         p.poll()
         (v2,) = self.posts()
@@ -384,6 +394,175 @@ class Process(Base):
         p.poll()
         (v2,) = self.posts()
         self.assertEqual(v2["ref"], "d.md #1 Пост (v2)")
+
+    def reply(self, ref, text="короче", to="smm"):
+        """Реплай владельца на вариант постов так, как его пишет бот: сессии, с пометкой поста (telegram.replied для постов
+        с сессией бот не пишет)."""
+        self.j.append("message.received", None, {
+            "text": f"{text}\n\n(в ответ на пост {ref}, файл `/w/d.md`)", "attachments": [],
+            "tg": {"chat": 1, "id": 7}, "to": to}, src="telegram")
+
+    def test_reply_to_the_open_draft_sends_the_next_one_and_keeps_the_revision(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2), self.draft(3))
+        p.poll()
+        self.taken()
+        self.reply("d.md #1 Пост")
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["d.md #2 Пост"])
+        self.assertEqual([o["ref"] for o in p.st["revising"].values()], ["d.md #1 Пост"])
+        self.assertEqual(p.st["open"]["ref"], "d.md #2 Пост")
+        self.assertEqual([x["ref"] for x in p.st["posts"]], ["d.md #3 Пост"])
+        self.reply("d.md #1 Пост")   # второй реплай на то же — ничего не двигает
+        p.poll()
+        self.assertEqual(self.taken(), [])
+
+    def test_reply_fact_for_a_draft_works_too(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2))
+        p.poll()
+        self.taken()
+        self.j.append("telegram.replied", None, {"ext": "tg-posts", "ref": "d.md #1 Пост", "text": "короче"}, src="telegram")
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["d.md #2 Пост"])
+
+    def test_reply_to_the_last_open_draft_leaves_the_queue_empty_until_the_new_version(self):
+        p = self.plugin()
+        self.queue(self.draft(1))
+        p.poll()
+        self.taken()
+        self.reply("d.md #1 Пост")
+        p.poll()
+        self.assertEqual((self.taken(), p.st["open"]), ([], None))
+        self.queue(self.draft(1, text="1. Пост\n\nкоротко"))
+        p.poll()
+        (v2,) = self.posts()
+        self.assertEqual((v2["ref"], v2["text"]), ("d.md #1 Пост (v2)", "1. Пост\n\nкоротко"))
+        self.assertEqual(p.st["revising"], {})
+
+    def test_new_version_of_a_revised_post_goes_first_in_the_queue_but_not_over_the_open_one(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2), self.draft(3))
+        p.poll()
+        self.taken()
+        self.reply("d.md #1 Пост")
+        p.poll()
+        self.taken()
+        self.queue(self.draft(1, text="1. Пост\n\nкоротко"))
+        p.poll()
+        self.assertEqual(self.posts(), [])   # открыт #2 — он не вытеснен
+        self.assertEqual((p.st["open"]["ref"], [x["ref"] for x in p.st["posts"]], p.st["revising"]),
+                         ("d.md #2 Пост", ["d.md #1 Пост", "d.md #3 Пост"], {}))
+        self.press("d.md #2 Пост", "❤️")
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["d.md #1 Пост (v2)"])   # #1 встал раньше #3
+
+    def test_reply_to_a_later_version_of_a_post_revises_it_again(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2))
+        p.poll()
+        self.reply("d.md #1 Пост")
+        p.poll()
+        self.queue(self.draft(1, text="1. Пост\n\nкоротко"))
+        self.press("d.md #2 Пост", "❤️")
+        p.poll()
+        self.assertEqual(p.st["open"]["ref"], "d.md #1 Пост (v2)")
+        self.taken()
+        self.reply("d.md #1 Пост (v2)")
+        p.poll()
+        self.assertEqual((p.st["open"], [o["ref"] for o in p.st["revising"].values()]), (None, ["d.md #1 Пост (v2)"]))
+
+    def test_same_text_again_for_a_revised_post_is_not_a_new_version(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2))
+        p.poll()
+        self.reply("d.md #1 Пост")
+        p.poll()
+        self.taken()
+        self.queue(self.draft(1))
+        p.poll()
+        self.assertEqual((self.taken(), p.st["posts"]), ([], []))
+        self.assertEqual(len(p.st["revising"]), 1)
+
+    def test_new_version_of_a_post_that_is_not_revised_replaces_it_as_before(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2), self.draft(3))
+        p.poll()
+        self.taken()
+        self.queue(self.draft(3, text="3. Пост\n\nдругой"))
+        p.poll()
+        self.assertEqual([x["text"] for x in p.st["posts"]], ["2. Пост\n\ntext 2", "3. Пост\n\nдругой"])
+
+    def test_button_under_a_post_in_revision_closes_it_without_touching_the_open_one(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2), self.draft(3))
+        p.poll()
+        self.reply("d.md #1 Пост")
+        p.poll()
+        self.taken()
+        self.press("d.md #1 Пост", "👎")
+        p.poll()
+        got = self.taken()
+        (msg,) = [e for e in got if e["type"] == "message.received"]
+        self.assertIn("слив", msg["data"]["text"])
+        self.assertIn("1", msg["data"]["text"])
+        self.assertEqual([e for e in got if e["type"] == "telegram.post"], [])
+        self.assertEqual((p.st["revising"], p.st["open"]["ref"], len(p.st["posts"])), ({}, "d.md #2 Пост", 1))
+
+    def test_button_under_the_old_version_after_the_new_one_is_queued_counts_for_nothing(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2))
+        p.poll()
+        self.reply("d.md #1 Пост")
+        p.poll()
+        self.queue(self.draft(1, text="1. Пост\n\nкоротко"))
+        p.poll()
+        self.taken()
+        self.press("d.md #1 Пост", "❤️")
+        p.poll()
+        self.assertEqual(self.taken(), [])
+        self.assertEqual(p.st["open"]["ref"], "d.md #2 Пост")
+
+    def test_reply_to_a_post_that_is_not_open_moves_nothing(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2), self.draft(3))
+        p.poll()
+        self.taken()
+        self.reply("d.md #3 Пост")   # ждёт в очереди
+        self.reply("d.md #1 Пост (v2)")   # чужая версия
+        self.reply("d.md #1 Пост", to="other")   # другой сессии
+        self.j.append("message.received", None, {"text": "просто слова", "tg": {"chat": 1, "id": 8}, "to": "smm"}, src="telegram")
+        self.j.append("message.received", None, {
+            "text": "(в ответ на пост d.md #1 Пост, файл `/w/d.md`)", "to": "smm"}, src="web")   # не из Telegram
+        p.poll()
+        self.assertEqual((self.taken(), p.st["revising"], p.st["open"]["ref"]), ([], {}, "d.md #1 Пост"))
+
+    def test_reply_to_a_deck_card_still_only_goes_to_the_deck(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.taken()
+        self.j.append("message.received", None, {"text": "x\n\n(в ответ на пост a)", "tg": {"chat": 1, "id": 9}}, src="telegram")
+        p.poll()
+        self.assertEqual((self.taken(), p.st["revising"]), ([], {}))
+
+    def test_revising_survives_restart_and_clear_drops_it(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2))
+        p.poll()
+        self.reply("d.md #1 Пост")
+        p.poll()
+        self.taken()
+        p = self.plugin()
+        self.assertEqual([o["ref"] for o in p.st["revising"].values()], ["d.md #1 Пост"])
+        self.queue(self.draft(1, text="1. Пост\n\nкоротко"))
+        p.poll()
+        self.assertEqual([x["ref"] for x in p.st["posts"]], ["d.md #1 Пост"])   # после перезапуска — тоже первым
+        self.reply("d.md #2 Пост")
+        p.poll()
+        cli.put(self.dir, {"op": "clear"})
+        p.poll()
+        self.assertEqual((p.st["revising"], p.st["open"], p.st["posts"]), ({}, None, []))
 
     def test_state_survives_restart_without_resending(self):
         self.queue(self.draft(1), self.draft(2))

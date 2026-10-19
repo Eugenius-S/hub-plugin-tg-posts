@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Посты владельцу в Telegram: команды кладут посты в очередь плагина, а он держит в Telegram ровно один неразобранный
-пост — следующий уходит, когда этот закрыт кнопкой ❤️ или 👎.
+пост — следующий уходит, когда этот закрыт кнопкой ❤️ или 👎 или когда на него ответили реплаем (докрутка).
 
     tg-posts drafts <файл.md> [--only 3,5] [--image N=<путь> …]   варианты постов из «## N. Название» в очередь; реплай
-                                                                   владельца на пост (докрутка) придёт этой сессии, а
-                                                                   новая версия — та же команда с --only N: заменяет пост
+                                                                   владельца на пост (докрутка) придёт этой сессии, следующий
+                                                                   пост уходит сразу; новая версия — та же команда с --only N
+                                                                   — встанет в очереди первой, за открытым
     tg-posts deck [--count 10] [--url <адрес колоды>]             карточки колоды в очередь; ❤️ 👎 и реплаи плагин
                                                                    сам отдаёт серверу колоды, без хода сессии
-    tg-posts status                                               что открыто и сколько в очереди
+    tg-posts status                                               что открыто, сколько в очереди и в докрутке
     tg-posts clear                                                сбросить очередь и открытый пост
 Только stdlib: сессия зовёт его как есть, без кода хаба на пути."""
 import argparse
@@ -65,7 +66,8 @@ def verdicts(state, items):
             st = json.load(f)
     except (OSError, ValueError):
         return ["new"] * len(items)
-    have = {p["key"]: p for p in (st.get("posts") or []) if isinstance(p, dict) and "key" in p}
+    have = {k: p for k, p in (st.get("revising") or {}).items() if isinstance(p, dict)}   # докручиваемые — их новая версия тоже «та же»
+    have.update({p["key"]: p for p in (st.get("posts") or []) if isinstance(p, dict) and "key" in p})
     o = st.get("open")
     if isinstance(o, dict) and "key" in o:
         have[o["key"]] = o
@@ -135,8 +137,8 @@ def cmd_drafts(a, state):
         return
     note = f"; без изменений (уже есть): {', '.join(map(str, same))}" if same else ""
     print(f"в очередь: {len(items) - len(same)} пост(ов) из {name}{note}{warn}; в Telegram идёт по одному — следующий после "
-          "❤️ или 👎. Реплай владельца (докрутка) придёт сюда с пометкой поста: пришли новую версию той же командой с "
-          "--only N — она заменит пост")
+          "❤️ или 👎. Реплай владельца (докрутка) придёт сюда с пометкой поста; после реплая следующий пост уже ушёл — "
+          "пришли новую версию той же командой с --only N: она встанет в очереди следующей")
 
 
 def deck_url(a, state):
@@ -214,6 +216,9 @@ def cmd_status(a, state):
     print(f"в очереди: {len(posts)}" + "".join(f"\n  {p['ref']}" for p in posts[:10]) + ("\n  …" if len(posts) > 10 else ""))
     if new:
         print(f"ещё не разобрано плагином: {new} команд(ы)")
+    rev = st.get("revising") or {}
+    if rev:
+        print(f"в докрутке: {len(rev)}" + "".join(f"\n  {p['ref']}" for p in list(rev.values())[:10]))
     if st.get("jobs"):
         print(f"оценок ждёт колоду: {len(st['jobs'])}")
 

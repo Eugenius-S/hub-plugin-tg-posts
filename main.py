@@ -1,6 +1,8 @@
 """Процесс плагина «Посты в Telegram»: ведёт очередь постов и шлёт владельцу ровно один неразобранный — следующий уходит,
-когда этот закрыт кнопкой ❤️ или 👎 (telegram.pressed). Реплай владельца пост не закрывает: у варианта постов (drafts)
-он идёт сессии, у карточки колоды (telegram.replied) — серверу колоды. Закрытие карточки колоды отдаётся серверу колоды
+когда этот закрыт кнопкой ❤️ или 👎 (telegram.pressed). Реплай владельца на карточку колоды (telegram.replied) идёт серверу
+колоды и карточку не закрывает. Реплай на вариант постов (drafts) идёт сессии (это делает бот) — пост уходит в докрутку
+(revising): место в Telegram освобождается, следующий пост уходит сразу, а новая версия докрученного встаёт в очереди
+первой, сразу за открытым. Закрытие карточки колоды отдаётся серверу колоды
 (/api/decide) — без хода сессии, колода лежит — повторяет до часа; закрытие варианта — сообщением сессии. Посты и
 команды кладёт CLI (bin/tg-posts) в ящик плагина. Ядро не правит: читает журнал своим смещением."""
 import json
@@ -16,7 +18,27 @@ EXT = "tg-posts"   # так его факты подписывает CLI (bin/tg
 NAME = os.environ.get("HUB_EXTENSION", EXT)
 LIKE, NOPE = "❤️", "👎"
 RETRY, GIVE_UP = 30, 3600   # с: повтор при лежащей колоде, сколько пытаться
-KEEP_SENT, KEEP_REVS = 300, 500   # сколько ушедших постов и счётчиков версий помнить
+KEEP_SENT, KEEP_REVS, KEEP_REVISING = 300, 500, 100   # сколько ушедших постов, счётчиков версий и постов в докрутке помнить
+REPLY_MARK = "(в ответ на пост "   # так бот помечает реплай на пост, ушедший сессии (modules/telegram/bot.py)
+
+
+def replied_ref(ev, session):
+    """ref поста, на который владелец ответил из Telegram, или None. Реплай на вариант постов бот отдаёт сессии сообщением
+    с пометкой «(в ответ на пост <ref>, файл …)» — фактом telegram.replied он помечает только посты без сессии."""
+    data = ev.get("data") or {}
+    if ev.get("type") == "telegram.replied" and data.get("ext") == EXT:
+        return data.get("ref")
+    if ev.get("type") != "message.received" or not str(ev.get("src") or "").startswith("telegram") \
+            or not data.get("tg") or data.get("to") != session:
+        return None
+    text = data.get("text") or ""
+    at = text.rfind(REPLY_MARK)
+    if at < 0:
+        return None
+    ref = text[at + len(REPLY_MARK):]
+    if ", файл `" in ref:
+        return ref.split(", файл `", 1)[0]
+    return ref[:-1] if ref.endswith(")") else None   # ровно одна скобка — закрывающая пометку; ref сам может кончаться на «(v2)»
 
 
 def emit(state, type, data):
@@ -72,6 +94,7 @@ class Plugin:
         st.setdefault("jobs", st.pop("queue", None) or [])
         st.setdefault("posts", [])
         st.setdefault("open", None)
+        st.setdefault("revising", {})   # ключ поста → пост, на который владелец ответил: ушёл сессии в докрутку, ждёт новой версии
         st.setdefault("sent", {})   # ref → что за пост ушёл (вариант или карточка): по нему узнаём нажатие
         st.setdefault("revs", {})   # ключ поста → сколько раз он уходил (новая версия — новый ref, старая кнопка не в счёт)
 
@@ -117,14 +140,20 @@ class Plugin:
     def react(self, ev):
         """Нажатие и реплай по ref: вариант постов знаем по `sent`, всё остальное (в том числе карточки колоды, ушедшие
         до очереди) — как раньше, колоде."""
-        data = ev.get("data") or {}
+        data, now_open = ev.get("data") or {}, self.st["open"]
+        if now_open and now_open["kind"] == "drafts" and replied_ref(ev, now_open["session"]) == now_open["ref"]:
+            return self.revise()
         if data.get("ext") != EXT or not data.get("ref"):
             return
-        info, now_open = self.st["sent"].get(data["ref"]) or {}, self.st["open"]
-        if info.get("kind") == "drafts":   # реплай на него бот отдаёт сессии сам; сюда доходит только нажатие
-            if ev.get("type") == "telegram.pressed" and now_open and now_open["ref"] == data["ref"] \
-                    and data.get("button") in (LIKE, NOPE):
-                self.close(data["button"])
+        info = self.st["sent"].get(data["ref"]) or {}
+        if info.get("kind") == "drafts":   # реплай на него бот отдаёт сессии сам; здесь — нажатие под открытым или докручиваемым
+            if ev.get("type") == "telegram.pressed" and data.get("button") in (LIKE, NOPE):
+                if now_open and now_open["ref"] == data["ref"]:
+                    self.close(data["button"])
+                else:
+                    rev = next((o for o in self.st["revising"].values() if o["ref"] == data["ref"]), None)
+                    if rev:
+                        self.close(data["button"], rev)
             return
         if ev.get("type") == "telegram.pressed" and now_open and now_open["ref"] == data["ref"] \
                 and data.get("button") in (LIKE, NOPE):
@@ -136,9 +165,23 @@ class Plugin:
     def job(self, path, body):
         self.st["jobs"].append({"path": path, "body": body, "since": self.clock(), "next": 0})
 
-    def close(self, button):
-        """❤️ / 👎 под открытым постом: закрыть, сказать кому надо и отправить следующий."""
+    def revise(self):
+        """Реплай на открытый вариант постов: он идёт в докрутку, а владельцу — следующий из очереди (пока сессия делает новую
+        версию). Новая версия встанет в очереди первой (enqueue)."""
         o, self.st["open"] = self.st["open"], None
+        rv = self.st["revising"]
+        rv.pop(o["key"], None)
+        rv[o["key"]] = o
+        while len(rv) > KEEP_REVISING:
+            del rv[next(iter(rv))]
+        self.pump()
+
+    def close(self, button, o=None):
+        """❤️ / 👎 под открытым постом (или под постом в докрутке — o): закрыть, сказать кому надо; открытый — отправить следующий."""
+        if o is None:
+            o, self.st["open"] = self.st["open"], None
+        else:
+            self.st["revising"].pop(o["key"], None)
         if o["kind"] == "deck":
             self.job("/api/decide", {"id": o["ref"], "verdict": "like" if button == LIKE else "reject"})
         else:
@@ -171,10 +214,20 @@ class Plugin:
 
     def enqueue(self, item):
         """→ 'new' | 'same' | 'revised'. Тот же пост (ключ) — не второй раз: карточка колоды уже тут — пропуск; вариант
-        постов — новая версия заменяет ждущую в очереди или открытую (тогда она уходит заново, с кнопками)."""
+        постов — новая версия заменяет ждущую в очереди или открытую (тогда она уходит заново, с кнопками); версия
+        докрученного (владелец ответил на него) встаёт в очереди первой, не вытесняя открытый."""
         key, st = item["key"], self.st
         o = st["open"]
         old = o if o and o["key"] == key else next((p for p in st["posts"] if p["key"] == key), None)
+        if old is None and key in st["revising"] and item["kind"] == "drafts":   # докрученный: новая версия — первой за открытым
+            old = st["revising"][key]
+            if old.get("path") and not item.get("path"):
+                item["path"], item["img"] = old["path"], old.get("img")
+            if all(old.get(k) == item.get(k) for k in ("text", "path", "img")):
+                return "same"
+            del st["revising"][key]
+            st["posts"].insert(0, item)
+            return "revised"
         if old is None:
             if item["kind"] == "deck" and any(j["body"].get("id") == item["ref"] for j in st["jobs"]):
                 return "same"   # оценка ещё не дошла до колоды — карточка у неё в списке неоценённых
@@ -205,7 +258,7 @@ class Plugin:
                 with open(os.path.join(d, n), encoding="utf-8") as f:
                     cmd = json.load(f)
                 if cmd.get("op") == "clear":
-                    self.st["posts"], self.st["open"] = [], None
+                    self.st["posts"], self.st["open"], self.st["revising"] = [], None, {}
                 else:
                     for item in cmd["items"]:
                         self.enqueue(item)
