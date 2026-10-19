@@ -1,0 +1,7 @@
+{
+  "name": "hub-plugin-tg-posts",
+  "owner": {"name": "Eugenius-S"},
+  "plugins": [
+    {"name": "tg-posts", "source": "./plugins/tg-posts", "description": "Посты владельцу в Telegram: варианты из файла черновиков по одному сообщению на пост с картинкой (реплай владельца приходит сессии с пометкой поста) и карточки колоды с кнопками ❤️ 👎.", "version": "0.1.0"}
+  ]
+}

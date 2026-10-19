@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Посты владельцу в Telegram (факт хаба telegram.post): по сообщению на пост — картинка, подпись, кнопки.
+
+    tg-posts drafts <файл.md> [--only 3,5] [--image N=<путь> …]   варианты постов из «## N. Название»; реплай
+                                                                   владельца на пост придёт этой сессии с пометкой поста
+    tg-posts deck [--count 10] [--url <адрес колоды>]             карточки колоды с ❤️ 👎; нажатия и реплаи плагин
+                                                                   сам отдаёт серверу колоды, без хода сессии
+Только stdlib: сессия зовёт его как есть, без кода хаба на пути."""
+import argparse
+import json
+import os
+import re
+import sys
+import time
+import urllib.parse
+import urllib.request
+import uuid
+
+EXT = "tg-posts"   # имя расширения в факте: по нему процесс плагина узнаёт свои нажатия и реплаи
+LIKE, NOPE = "❤️", "👎"
+_last = 0
+
+
+def put(state, data):
+    """Факт в ящик хаба (как core.spool.put): атомарно, порядок — по имени."""
+    global _last
+    d = os.path.join(state, "spool")
+    os.makedirs(d, exist_ok=True)
+    _last = max(time.time_ns(), _last + 1)
+    name = f"{_last:020d}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    tmp = os.path.join(d, "." + name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"type": "telegram.post", "entity": None, "data": data, "src": f"ext:{EXT}", "ts": time.time()},
+                  f, ensure_ascii=False)
+    os.replace(tmp, os.path.join(d, name + ".json"))
+
+
+def drafts(text):
+    """[(N, название, тело)] из «## N. Название» — тело до следующего «## » без хвостовых «---»."""
+    out = []
+    parts = re.split(r"^##[ \t]+(\d+)[.)][ \t]*(.*)$", text, flags=re.M)
+    for i in range(1, len(parts) - 2, 3):
+        body = re.sub(r"(\s*\n\s*-{3,}\s*)+$", "", parts[i + 2]).strip()
+        out.append((int(parts[i]), parts[i + 1].strip(), body))
+    return out
+
+
+def images(pairs):
+    got = {}
+    for p in pairs or []:
+        n, sep, path = p.partition("=")
+        if not sep or not n.strip().isdigit():
+            sys.exit(f"--image ждёт N=<путь>, а не «{p}»")
+        path = os.path.abspath(os.path.expanduser(path.strip()))
+        if not os.path.isfile(path):
+            sys.exit(f"нет файла {path}")
+        got[int(n)] = path
+    return got
+
+
+def cmd_drafts(a, state):
+    path = os.path.abspath(a.file)
+    with open(path, encoding="utf-8") as f:
+        posts = drafts(f.read())
+    only = {int(x) for x in a.only.split(",")} if a.only else None
+    pics = images(a.image)
+    session = a.session or os.environ.get("HUB_SESSION")
+    if not session:
+        sys.exit("нужна сессия: --session <имя> (в сессии хаба — сама)")
+    sent = 0
+    for n, title, body in posts:
+        if only and n not in only:
+            continue
+        data = {"text": f"{n}. {title}\n\n{body}".strip(), "ref": f"{os.path.basename(path)} #{n} {title}",
+                "session": session}
+        if n in pics:
+            data["path"] = pics[n]
+        put(state, data)
+        sent += 1
+    print(f"в Telegram: {sent} пост(ов) из {os.path.basename(path)}; реплай владельца придёт сюда с пометкой поста")
+
+
+def deck_url(a, state):
+    if a.url:
+        return a.url.rstrip("/")
+    cfg = os.environ.get("HUB_CONFIG") or os.path.expanduser("~/.config/hub-core/hub.json")
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            ext = json.load(f).get("extensions") or {}
+    except (OSError, ValueError):
+        ext = {}
+    for k, v in ext.items():
+        if (k == EXT or k.endswith(":" + EXT)) and isinstance(v, dict) and v.get("deck"):
+            return str(v["deck"]).rstrip("/")
+    return "http://localhost:7777"
+
+
+def fetch(url):
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=10) as r:   # колода — localhost
+        return json.load(r)
+
+
+def card_post(c, pic=None):
+    text = "\n\n".join(x.strip() for x in (c.get("caption"), c.get("caption_ru")) if x and x.strip())
+    data = {"text": text or c["id"], "ref": c["id"], "buttons": [LIKE, NOPE]}
+    if pic:
+        data["path"] = pic
+    return data
+
+
+def thumb(url, c, state):
+    """Превью карточки — с сервера колоды в папку плагина (бот грузит файл с диска); не вышло — пост без картинки."""
+    name = c.get("thumb")
+    if not name:
+        return None
+    path = os.path.join(state, EXT, "media", re.sub(r"[^\w.-]", "_", os.path.basename(name)))
+    if os.path.isfile(path):
+        return path
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
+                f"{url}/media/{urllib.parse.quote(name)}", timeout=20) as r:
+            raw = r.read()
+    except OSError as e:
+        print(f"{c['id']}: превью не скачалось ({e}) — без картинки", file=sys.stderr)
+        return None
+    with open(path + ".tmp", "wb") as f:
+        f.write(raw)
+    os.replace(path + ".tmp", path)
+    return path
+
+
+def cmd_deck(a, state):
+    url = deck_url(a, state)
+    try:
+        got = fetch(url + "/api/deck")
+    except (OSError, ValueError) as e:
+        sys.exit(f"колода {url} не отвечает: {e}")
+    cards = (got.get("cards") if isinstance(got, dict) else got) or []   # там только неоценённые
+    todo = [c for c in cards if c.get("id")][: a.count]
+    for c in todo:
+        put(state, card_post(c, thumb(url, c, state)))
+    print(f"в Telegram: {len(todo)} из {len(cards)} карточек колоды {url}; ❤️ 👎 и реплаи плагин отдаст колоде сам")
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="tg-posts")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    d = sub.add_parser("drafts")
+    d.add_argument("file")
+    d.add_argument("--only")
+    d.add_argument("--image", action="append")
+    d.add_argument("--session")
+    k = sub.add_parser("deck")
+    k.add_argument("--count", type=int, default=10)
+    k.add_argument("--url")
+    a = p.parse_args(argv)
+    state = os.environ.get("HUB_STATE_DIR")
+    if not state:
+        sys.exit("нужен HUB_STATE_DIR (в сессии хаба он есть)")
+    (cmd_drafts if a.cmd == "drafts" else cmd_deck)(a, state)
+
+
+if __name__ == "__main__":
+    main()
