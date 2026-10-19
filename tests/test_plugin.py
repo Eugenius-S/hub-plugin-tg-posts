@@ -125,6 +125,41 @@ class Cli(Base):
         self.assertNotIn("path", first)
         self.assertEqual((second["ref"], second["path"]), ("drafts-2026-10-19.md #2 Второй пост", pic))
 
+    def test_overwritten_picture_is_a_revision_and_the_cli_does_not_lie_about_unchanged(self):
+        md = os.path.join(self.dir, "d.md")
+        with open(md, "w", encoding="utf-8") as f:
+            f.write(DRAFTS)
+        pic = os.path.join(self.dir, "card.png")
+
+        def run():
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cli.main(["drafts", md, "--only", "2", "--image", f"2={pic}"])
+            return buf.getvalue()
+
+        def write(raw):
+            with open(pic, "wb") as f:
+                f.write(raw)
+
+        def plugin_state(items):   # как будто плагин уже разобрал ящик и держит пост открытым
+            os.makedirs(os.path.join(self.dir, "tg-posts"), exist_ok=True)
+            with open(os.path.join(self.dir, "tg-posts", "state.json"), "w", encoding="utf-8") as f:
+                json.dump({"open": items[0], "posts": []}, f)
+
+        write(b"one")
+        self.assertIn("в очередь: 1 пост", run())
+        first = self.inbox()[0]["items"][0]
+        plugin_state([first])
+        self.assertIn("без изменений", run())   # ничего не менялось — сессия узнаёт, что ушло нечего
+        write(b"two")   # тот же путь, другая картинка
+        out = run()
+        self.assertIn("в очередь: 1 пост", out)
+        self.assertNotIn("без изменений", out)
+        second = self.inbox()[-1]["items"][0]
+        self.assertEqual(first["path"], second["path"])
+        self.assertNotEqual(first["img"], second["img"])
+        self.assertEqual(second["img"], cli.fingerprint(pic))
+
     def test_deck_queues_unrated_cards_with_their_thumbs(self):
         deck = Deck([{"id": "reddit:t3_a/b", "caption": "Line\nmore", "caption_ru": "Строка", "thumb": "a.thumb.jpg"},
                      {"id": "arena:2", "caption": "Two"}])
@@ -310,6 +345,45 @@ class Process(Base):
         p.poll()
         (two,) = self.posts()
         self.assertEqual((two["text"], two["path"]), ("2. Пост\n\nновый", "/w/2.png"))   # картинка не потерялась
+
+    def test_same_path_with_new_picture_is_a_new_version_and_goes_out_again(self):
+        p = self.plugin()
+        self.queue(self.draft(1, path="/w/1.png", img="aaa"), self.draft(2, path="/w/2.png", img="bbb"))
+        p.poll()
+        self.taken()
+        self.queue(self.draft(1, path="/w/1.png", img="ccc"))   # открытый: файл перезаписан, путь тот же
+        p.poll()
+        (v2,) = self.posts()
+        self.assertEqual((v2["ref"], v2["path"]), ("d.md #1 Пост (v2)", "/w/1.png"))
+        self.queue(self.draft(1, path="/w/1.png", img="ccc"), self.draft(2, path="/w/2.png", img="ddd"))
+        p.poll()   # открытая v2 не изменилась — молчим; ждущий пост 2 с новой картинкой заменён на месте
+        self.assertEqual(self.taken(), [])
+        self.press("d.md #1 Пост (v2)", "❤️")
+        p.poll()
+        (two,) = self.posts()
+        self.assertEqual(two["ref"], "d.md #2 Пост")
+        self.assertEqual(p.st["open"]["img"], "ddd")
+
+    def test_text_edit_without_image_keeps_the_picture_and_its_print(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2, path="/w/2.png", img="bbb"))
+        p.poll()
+        self.taken()
+        self.queue(self.draft(2, text="2. Пост\n\nновый"))
+        p.poll()
+        self.press("d.md #1 Пост", "❤️")
+        p.poll()
+        self.assertEqual((p.st["open"]["path"], p.st["open"]["img"]), ("/w/2.png", "bbb"))
+
+    def test_old_item_without_print_is_replaced_by_one_with_it(self):
+        p = self.plugin()
+        self.queue(self.draft(1, path="/w/1.png"))
+        p.poll()
+        self.taken()
+        self.queue(self.draft(1, path="/w/1.png", img="aaa"))
+        p.poll()
+        (v2,) = self.posts()
+        self.assertEqual(v2["ref"], "d.md #1 Пост (v2)")
 
     def test_state_survives_restart_without_resending(self):
         self.queue(self.draft(1), self.draft(2))

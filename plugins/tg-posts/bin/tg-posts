@@ -11,6 +11,7 @@
     tg-posts clear                                                сбросить очередь и открытый пост
 Только stdlib: сессия зовёт его как есть, без кода хаба на пути."""
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -45,6 +46,41 @@ def enqueue(state, items):
     put(state, {"op": "post", "items": items})
     return "" if os.path.isfile(os.path.join(state, EXT, "state.json")) else \
         " (состояния плагина нет — процесс плагина не запущен? без него посты не уйдут)"
+
+
+def fingerprint(path):
+    """Отпечаток картинки: тот же путь с другим содержимым — другая версия поста."""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+    except OSError:
+        return None
+
+
+def verdicts(state, items):
+    """['new' | 'same' | 'revised'] по каждому посту — как решит плагин (его enqueue), по его state.json, только чтение.
+    Разобрано плагином не всё, что лежит в ящике: ответ «по состоянию на сейчас»; ставим в очередь всё равно."""
+    try:
+        with open(os.path.join(state, EXT, "state.json"), encoding="utf-8") as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return ["new"] * len(items)
+    have = {p["key"]: p for p in (st.get("posts") or []) if isinstance(p, dict) and "key" in p}
+    o = st.get("open")
+    if isinstance(o, dict) and "key" in o:
+        have[o["key"]] = o
+    out = []
+    for it in items:
+        old = have.get(it["key"])
+        if old is None:
+            out.append("new")
+        elif it["kind"] == "deck":
+            out.append("same")
+        else:
+            path, img = (it.get("path"), it.get("img")) if it.get("path") else (old.get("path"), old.get("img"))
+            same = it["text"] == old.get("text") and path == old.get("path") and img == old.get("img")
+            out.append("same" if same else "revised")
+    return out
 
 
 def drafts(text):
@@ -86,10 +122,19 @@ def cmd_drafts(a, state):
         item = {"kind": "drafts", "key": f"{path}#{n}", "text": f"{n}. {title}\n\n{body}".strip(),
                 "ref": f"{os.path.basename(path)} #{n} {title}", "session": session, "file": path, "n": n, "title": title}
         if n in pics:
-            item["path"] = pics[n]
+            item["path"], item["img"] = pics[n], fingerprint(pics[n])
         items.append(item)
+    verdict = verdicts(state, items)
     warn = enqueue(state, items)
-    print(f"в очередь: {len(items)} пост(ов) из {os.path.basename(path)}{warn}; в Telegram идёт по одному — следующий после "
+    same = [it["n"] for it, v in zip(items, verdict) if v == "same"]
+    name = os.path.basename(path)
+    if items and len(same) == len(items):
+        print(f"без изменений — {'пост' if len(same) == 1 else 'посты'} {', '.join(map(str, same))} из {name} уже открыт или "
+              f"в очереди с тем же текстом и картинкой, второй раз не отправлю. Новая версия — другой текст или другая "
+              f"картинка (файл с новым содержимым подойдёт){warn}")
+        return
+    note = f"; без изменений (уже есть): {', '.join(map(str, same))}" if same else ""
+    print(f"в очередь: {len(items) - len(same)} пост(ов) из {name}{note}{warn}; в Telegram идёт по одному — следующий после "
           "❤️ или 👎. Реплай владельца (докрутка) придёт сюда с пометкой поста: пришли новую версию той же командой с "
           "--only N — она заменит пост")
 

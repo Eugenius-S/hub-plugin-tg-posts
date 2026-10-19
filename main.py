@@ -183,8 +183,8 @@ class Plugin:
         if item["kind"] == "deck":
             return "same"
         if old.get("path") and not item.get("path"):
-            item["path"] = old["path"]   # картинку при правке текста не теряем
-        if all(old.get(k) == item.get(k) for k in ("text", "path")):
+            item["path"], item["img"] = old["path"], old.get("img")   # картинку при правке текста не теряем
+        if all(old.get(k) == item.get(k) for k in ("text", "path", "img")):   # img — отпечаток файла: тот же путь, другая картинка — новая версия
             return "same"
         if old is o:
             st["open"] = None
