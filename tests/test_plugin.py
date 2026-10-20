@@ -654,6 +654,23 @@ class Process(Base):
         p.poll()
         self.assertEqual(([x["ref"] for x in p.st["posts"]], p.st["open"]["ref"]), (["b"], "a"))
 
+    def test_new_version_of_the_open_deck_card_replaces_it_at_once_and_the_same_version_does_not(self):
+        # 20.10 t3_1wgycpb: реплай → карточка вернулась старой (открыта) → райтер переписал → deck --id молчал
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.posts()
+        self.deck_revised("a", text="card a")   # та же версия — открытая остаётся, второй раз не уходит
+        p.poll()
+        self.assertEqual((self.posts(), p.st["open"]["ref"]), ([], "a"))
+        self.deck_revised("a", text="card a v2")
+        p.poll()
+        (a,) = self.posts()
+        self.assertEqual((a["ref"], a["text"]), ("a", "card a v2"))
+        self.assertEqual(([x["ref"] for x in p.st["posts"]], p.st["open"]["ref"], p.st["open"]["text"]),
+                         (["b"], "a", "card a v2"))
+        self.assertEqual((self.deck.calls, p.st["revising"]), ([], {}))   # старую закрыли без оценки колоде
+
     def test_button_under_a_deck_card_in_revision_closes_it_without_touching_the_open_one(self):
         p = self.plugin()
         self.queue(self.card("a"), self.card("b"), self.card("c"))

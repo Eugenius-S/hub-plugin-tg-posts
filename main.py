@@ -370,6 +370,11 @@ class Plugin:
             st["posts"].append(item)
             return "new"
         if item["kind"] == "deck":
+            if fresh and old is o and any(old.get(k) != item.get(k) for k in ("text", "path", "img")):
+                self.cancel_held(o["ref"])   # открытая карточка вернулась от колоды правленой: старая закрывается без оценки, новая — сразу
+                st["open"] = None
+                st["posts"].insert(0, item)
+                return "revised"
             return "same"
         if old.get("path") and not item.get("path"):
             item["path"], item["img"] = old["path"], old.get("img")   # картинку при правке текста не теряем
