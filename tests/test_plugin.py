@@ -55,6 +55,8 @@ class Deck:
                 if self.path == "/api/deck":
                     return self.reply(200, json.dumps({"cards": cards, "liked": 0}).encode())
                 if self.path.startswith("/media/"):
+                    if self.path.endswith(".mp4"):
+                        return self.reply(200, b"\x00\x00\x00 ftypmp4video")
                     return self.reply(200, b"\x89PNG\r\n\x1a\nthumb")
                 self.reply(404, b"{}")
 
@@ -175,6 +177,32 @@ class Cli(Base):
             self.assertTrue(f.read().endswith(b"thumb"))
         self.assertNotIn("path", b)
         self.assertNotIn("session", a)   # нажатия и реплаи — плагину, не сессии
+
+    def test_deck_card_with_local_video_goes_as_video_not_thumb(self):
+        deck = Deck([{"id": "c:1", "caption": "Roof", "thumb": "c.thumb.jpg", "local_video": "c.roof.mp4"},
+                     {"id": "c:2", "caption": "Pic", "thumb": "d.thumb.jpg"}])
+        try:
+            cli.main(["deck", "--url", deck.url, "--count", "5"])
+        finally:
+            deck.server.shutdown()
+        (cmd,) = self.inbox()
+        a, b = cmd["items"]
+        self.assertTrue(a["path"].endswith("c.roof.mp4"))
+        with open(a["path"], "rb") as f:
+            self.assertTrue(f.read().endswith(b"mp4video"))
+        self.assertTrue(b["path"].endswith("d.thumb.jpg"))
+
+    def test_deck_card_whose_video_does_not_download_falls_back_to_thumb(self):
+        deck = Deck([{"id": "c:1", "caption": "Roof", "thumb": "c.thumb.jpg", "local_video": "c.roof.mp4"}])
+        cli.VIDEO_MAX = 4   # скачанное больше предела Bot API — картинкой
+        try:
+            cli.main(["deck", "--url", deck.url])
+        finally:
+            deck.server.shutdown()
+            cli.VIDEO_MAX = 50 * 1024 * 1024
+        (cmd,) = self.inbox()
+        self.assertTrue(cmd["items"][0]["path"].endswith("c.thumb.jpg"))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "tg-posts", "media", "c.roof.mp4")))
 
     def test_deck_by_id_queues_those_cards_as_fresh_even_if_not_among_the_first_count(self):
         cards = [{"id": f"c:{i}", "caption": f"Card {i}", "thumb": f"{i}.jpg"} for i in range(5)]
@@ -428,6 +456,30 @@ class Process(Base):
         self.queue(self.card("a"))   # deck без --id видит её среди неоценённых: старую версию не отдаём
         p.poll()
         self.assertEqual(([x["ref"] for x in p.st["posts"]], list(p.st["revising"])), ([], ["a"]))
+
+    def test_close_op_closes_the_open_card_without_a_second_decision_and_sends_the_next(self):
+        # 20.10: карточку уже оценили в колоде (другой сессией), в плагине она держала очередь
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.posts()
+        cli.put(self.dir, {"op": "close", "ref": "a"})
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["b"])
+        self.assertEqual((p.st["open"]["ref"], self.deck.calls), ("b", []))
+        self.press("a", "❤️")   # кнопка под закрытым сообщением очередь не трогает
+        p.poll()
+        self.assertEqual(p.st["open"]["ref"], "b")
+
+    def test_close_op_for_a_card_that_is_not_open_drops_it_from_the_queue_and_the_rest_stays(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.card("c"))
+        p.poll()
+        self.posts()
+        cli.put(self.dir, {"op": "close", "ref": "b"})
+        cli.put(self.dir, {"op": "close", "ref": "nope"})
+        p.poll()
+        self.assertEqual(([x["key"] for x in p.st["posts"]], p.st["open"]["ref"], self.deck.calls), (["c"], "a", []))
 
     def test_card_already_shown_never_comes_again_not_after_clear_or_restart(self):
         # 20.10: smm-post-tinder сделал clear + deck — карточка из докрутки (владелец уже ответил на неё) ушла как новая

@@ -12,6 +12,7 @@
                                                                    в очереди первыми, сразу за открытой
     tg-posts status                                               что открыто, сколько в очереди и в докрутке
     tg-posts clear                                                сбросить очередь и открытый пост
+    tg-posts close <ref>                                          закрыть пост без оценки колоде (её уже поставили в колоде); открытый — следующий уходит сразу
 Только stdlib: сессия зовёт его как есть, без кода хаба на пути."""
 import argparse
 import hashlib
@@ -172,27 +173,39 @@ def card_post(c, pic=None):
     return data
 
 
-def thumb(url, c, state, fresh=False):
-    """Превью карточки — с сервера колоды в папку плагина (бот грузит файл с диска); не вышло — пост без картинки.
-    fresh — карточка докручена: картинка могла смениться под тем же именем, кэш не берём."""
-    name = c.get("thumb")
-    if not name:
-        return None
+VIDEO_MAX = 50 * 1024 * 1024   # предел загрузки Bot API: больше — в Telegram пойдёт картинка
+
+
+def download(url, name, state, fresh, limit=None):
+    """Файл карточки с сервера колоды в папку плагина (бот грузит файл с диска); None — не вышло или больше limit."""
     path = os.path.join(state, EXT, "media", re.sub(r"[^\w.-]", "_", os.path.basename(name)))
     if os.path.isfile(path) and not fresh:
         return path
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
-                f"{url}/media/{urllib.parse.quote(name)}", timeout=20) as r:
-            raw = r.read()
+                f"{url}/media/{urllib.parse.quote(name)}", timeout=60 if limit else 20) as r:
+            raw = r.read(limit + 1 if limit else -1)
     except OSError as e:
-        print(f"{c['id']}: превью не скачалось ({e}) — без картинки", file=sys.stderr)
+        print(f"{name}: не скачалось ({e})", file=sys.stderr)
+        return None
+    if limit and len(raw) > limit:
+        print(f"{name}: больше {limit} байт — пойдёт картинкой", file=sys.stderr)
         return None
     with open(path + ".tmp", "wb") as f:
         f.write(raw)
     os.replace(path + ".tmp", path)
     return path
+
+
+def thumb(url, c, state, fresh=False):
+    """Файл карточки для Telegram: видео (local_video — имя файла на сервере колоды), иначе превью; не вышло — пост без
+    картинки. fresh — карточка докручена: файл мог смениться под тем же именем, кэш не берём."""
+    if c.get("local_video"):
+        got = download(url, c["local_video"], state, fresh, VIDEO_MAX)
+        if got:
+            return got
+    return download(url, c["thumb"], state, fresh) if c.get("thumb") else None
 
 
 def cmd_deck(a, state):
@@ -237,6 +250,11 @@ def cmd_status(a, state):
         print(f"оценок ждёт колоду: {len(st['jobs'])}")
 
 
+def cmd_close(a, state):
+    put(state, {"op": "close", "ref": a.ref})
+    print(f"{a.ref}: закрыта в плагине без оценки колоде; если она была открыта — владельцу уходит следующая")
+
+
 def cmd_clear(a, state):
     put(state, {"op": "clear"})
     print("очередь и открытый пост сброшены (сообщения, уже висящие в Telegram, остаются)")
@@ -254,13 +272,15 @@ def main(argv=None):
     k.add_argument("--count", type=int, default=10)
     k.add_argument("--url")
     k.add_argument("--id", nargs="+", action="extend")
+    c = sub.add_parser("close")
+    c.add_argument("ref")
     sub.add_parser("status")
     sub.add_parser("clear")
     a = p.parse_args(argv)
     state = os.environ.get("HUB_STATE_DIR")
     if not state:
         sys.exit("нужен HUB_STATE_DIR (в сессии хаба он есть)")
-    {"drafts": cmd_drafts, "deck": cmd_deck, "status": cmd_status, "clear": cmd_clear}[a.cmd](a, state)
+    {"drafts": cmd_drafts, "deck": cmd_deck, "status": cmd_status, "clear": cmd_clear, "close": cmd_close}[a.cmd](a, state)
 
 
 if __name__ == "__main__":

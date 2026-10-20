@@ -283,6 +283,15 @@ class Plugin:
                 self.ask_why("drafts", o)
         self.pump()
 
+    def close_quiet(self, ref):
+        """Пост уже закрыт там, где его оценили (колода, страница): убрать из очереди, открытых и докрутки без оценки колоде;
+        открытый — следующий уходит на pump."""
+        self.cancel_held(ref)
+        self.st["posts"] = [p for p in self.st["posts"] if p["ref"] != ref]
+        self.st["revising"] = {k: p for k, p in self.st["revising"].items() if p["ref"] != ref}
+        if self.st["open"] and self.st["open"]["ref"] == ref:
+            self.st["open"] = None
+
     def pump(self):
         """В Telegram висит один неразобранный пост: открытого нет — отправить следующий из очереди."""
         if self.st["open"] is not None or not self.st["posts"]:
@@ -364,6 +373,8 @@ class Plugin:
                     cmd = json.load(f)
                 if cmd.get("op") == "clear":
                     self.st["posts"], self.st["open"], self.st["revising"] = [], None, {}
+                elif cmd.get("op") == "close":
+                    self.close_quiet(str(cmd.get("ref") or ""))
                 else:
                     for item in cmd["items"]:
                         self.enqueue(item)
