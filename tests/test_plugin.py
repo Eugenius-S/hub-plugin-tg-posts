@@ -44,7 +44,7 @@ Text three.
 class Deck:
     """Поддельный сервер колоды: /api/deck, /media/<файл>, запросы POST — в calls."""
     def __init__(self, cards):
-        self.calls, self.down = [], False
+        self.calls, self.down, self.badges, self.badge = [], False, [], None   # badge — ответ /api/badge (None — колода его не знает)
         me = self
 
         class H(BaseHTTPRequestHandler):
@@ -58,6 +58,11 @@ class Deck:
                     if self.path.endswith(".mp4"):
                         return self.reply(200, b"\x00\x00\x00 ftypmp4video")
                     return self.reply(200, b"\x89PNG\r\n\x1a\nthumb")
+                if self.path.startswith("/api/badge"):
+                    me.badges.append(self.path)
+                    if me.badge is None:
+                        return self.reply(404, b"{}")
+                    return self.reply(200, json.dumps(me.badge).encode())
                 self.reply(404, b"{}")
 
             def do_POST(self):
@@ -376,6 +381,46 @@ class Process(Base):
         p.poll()
         self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "like"}),
                                            ("/api/decide", {"id": "b", "verdict": "reject"})])
+
+    def test_deck_card_gets_the_batch_number_as_its_first_line(self):
+        p = self.plugin()
+        self.deck.badge = {"text": "7 из 21"}
+        self.queue(self.card("a b"), self.card("b"))
+        p.poll()
+        (a,) = self.posts()
+        self.assertEqual(a["text"], "7 из 21\n\ncard a b")
+        self.assertEqual(self.deck.badges, ["/api/badge?id=a+b"])   # id закодирован
+        self.assertEqual(p.st["open"]["text"], "card a b")   # в очереди текст прежний: номер ставится при отправке
+        self.deck.badge = {"text": "8 из 21"}
+        self.press("a b", "❤️")
+        p.poll()
+        (b,) = self.posts()
+        self.assertEqual(b["text"], "8 из 21\n\ncard b")   # номер свежий для каждой карточки
+
+    def test_no_badge_line_when_the_deck_is_silent_or_has_no_text(self):
+        p = self.plugin()
+        for i, answer in enumerate((None, {}, {"text": None}, {"text": 7}, {"text": "  "})):
+            self.deck.badge = answer
+            ref = f"c{i}"
+            self.queue(self.card(ref))
+            p.poll()
+            (x,) = self.posts()
+            self.assertEqual(x["text"], f"card {ref}", answer)
+            self.press(ref, "❤️")
+        self.deck.server.shutdown()   # колода не отвечает совсем
+        self.queue(self.card("z"))
+        p.poll()
+        (z,) = self.posts()
+        self.assertEqual(z["text"], "card z")
+
+    def test_drafts_do_not_ask_the_deck_for_a_badge(self):
+        p = self.plugin()
+        self.deck.badge = {"text": "7 из 21"}
+        self.queue(self.draft(1))
+        p.poll()
+        (d,) = self.posts()
+        self.assertEqual(d["text"], "1. Пост\n\ntext 1")
+        self.assertEqual(self.deck.badges, [])
 
     def reply_to_card(self, ref, text="автора"):
         self.j.append("telegram.replied", None, {"ext": "tg-posts", "ref": ref, "text": text}, src="telegram")

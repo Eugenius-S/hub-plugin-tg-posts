@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from core import catalog, journal, spool
@@ -19,6 +20,7 @@ NAME = os.environ.get("HUB_EXTENSION", EXT)
 LIKE, NOPE = "❤️", "👎"
 RETRY, GIVE_UP = 30, 3600   # с: повтор при лежащей колоде, сколько пытаться
 KEEP_SENT, KEEP_REVS, KEEP_REVISING, KEEP_SEEN = 300, 500, 100, 3000   # сколько ушедших постов, счётчиков версий, постов в докрутке и показанных карточек помнить
+BADGE_WAIT, BADGE_MAX = 3, 40   # с: сколько ждать номер карточки у колоды; знаков в строке номера
 WHY_HOLD = 1200   # с: отказ карточки колоды ждёт причину так долго, потом уходит без неё
 WHY_DECK = [("Баян", "stale"), ("Не наш голос", "off-brand"), ("Не дизайн", "not-design"),   # причины веб-тиндера (reason в /api/decide)
             ("Слабый кадр", "weak-visual"), ("Мыльно", "soft"), ("Дубль", "dupe")]
@@ -137,6 +139,16 @@ class Plugin:
         except OSError as e:
             sys.stderr.write(f"tg-posts: колода не отвечает ({e}) — повторю\n")
             return False
+
+    def badge(self, ref):
+        """Номер карточки в текущем батче от колоды («7 из 21») или "": колода молчит, дольше BADGE_WAIT, ответ без текста — без строки."""
+        url = deck_url(self.dir) + "/api/badge?" + urllib.parse.urlencode({"id": ref})
+        try:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=BADGE_WAIT) as r:
+                text = json.loads(r.read(4096).decode("utf-8", "replace")).get("text")
+        except (OSError, ValueError, AttributeError):
+            return ""
+        return " ".join(text.split())[:BADGE_MAX] if isinstance(text, str) else ""
 
     def handle(self, events):
         changed = False
@@ -303,6 +315,10 @@ class Plugin:
         rev = self.st["revs"][item["key"]] = self.st["revs"].get(item["key"], 0) + 1
         ref = item["ref"][:180] + (f" (v{rev})" if rev > 1 and item["kind"] == "drafts" else "")   # у колоды ref — id карточки
         data = {"text": item["text"], "ref": ref, "buttons": [LIKE, NOPE]}
+        if item["kind"] == "deck":   # номер берём в момент отправки: для deck --id и после докрутки он свежий
+            badge = self.badge(item["ref"])
+            if badge:
+                data["text"] = f"{badge}\n\n{item['text']}" if item["text"] else badge
         for k in ("path", "session"):
             if item.get(k):
                 data[k] = item[k]
