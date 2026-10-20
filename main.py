@@ -69,7 +69,10 @@ def request(ev):
         verdict = {LIKE: "like", NOPE: "reject"}.get(data.get("button"))
         return ("/api/decide", {"id": data["ref"], "verdict": verdict}) if verdict else None
     if ev.get("type") == "telegram.replied" and (data.get("text") or "").strip():
-        return "/api/direct", {"id": data["ref"], "text": data["text"].strip(), "from": EXT}   # from — колода правит в фоне и сама вернёт карточку (tg-posts deck --id)
+        body = {"id": data["ref"], "text": data["text"].strip(), "from": EXT}   # from — колода правит в фоне и сама вернёт карточку (tg-posts deck --id)
+        if str(data.get("quote") or "").strip():
+            body["quote"] = data["quote"].strip()   # то, что владелец выделил цитатой: «точка» на ней обрезает подпись здесь
+        return "/api/direct", body
     return None
 
 
@@ -336,11 +339,18 @@ class Plugin:
             del st["revising"][key]
             st["posts"].insert(0, item)
             return "revised"
+        if fresh and item["kind"] == "deck" and old is not None and old is not o:   # ждёт в очереди — вернулась правленой: первой
+            st["posts"].remove(old)
+            st["posts"].insert(0, item)
+            return "revised"
         if old is None:
             if item["kind"] == "deck" and any(j["body"].get("id") == item["ref"] for j in st["jobs"]):
                 return "same"   # оценка ещё не дошла до колоды — карточка у неё в списке неоценённых
             if item["kind"] == "deck" and not fresh and self.shown(item["ref"]):
                 return "same"   # владелец её уже видел (оценил, ответил реплаем, clear сбросил очередь): второй раз не шлём
+            if item["kind"] == "deck" and fresh:   # правленая колодой, но не в докрутке (реплай был на неоткрытую карточку, перезапуск): первой, не в хвост
+                st["posts"].insert(0, item)
+                return "revised"
             st["posts"].append(item)
             return "new"
         if item["kind"] == "deck":

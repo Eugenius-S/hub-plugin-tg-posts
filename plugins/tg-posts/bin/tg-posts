@@ -81,7 +81,7 @@ def verdicts(state, items):
             shown = it.get("ref") in (st.get("seen") or {}) or (st.get("sent") or {}).get(it.get("ref"), {}).get("kind") == "deck"
             out.append("same" if it["kind"] == "deck" and not it.get("fresh") and shown else "new")   # показанную карточку плагин не шлёт второй раз
         elif it["kind"] == "deck":
-            out.append("revised" if it.get("fresh") and it["key"] in (st.get("revising") or {}) else "same")
+            out.append("revised" if it.get("fresh") and old is not o else "same")   # открытую не трогает; ждущая и докручиваемая возвращаются первыми
         else:
             path, img = (it.get("path"), it.get("img")) if it.get("path") else (old.get("path"), old.get("img"))
             same = it["text"] == old.get("text") and path == old.get("path") and img == old.get("img")

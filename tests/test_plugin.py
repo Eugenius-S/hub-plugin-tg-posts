@@ -556,6 +556,50 @@ class Process(Base):
         (a,) = self.posts()
         self.assertEqual(a["text"], "card a v2")
 
+    def test_revised_card_that_is_not_tracked_goes_first_not_to_the_tail(self):
+        # реплай на карточку, которая не открыта (в revising её нет), → deck --id: возврат — первым, а не после десяти ждущих
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.card("c"), self.card("d"))
+        p.poll()
+        self.posts()
+        self.press("a", "❤️")
+        p.poll()
+        self.posts()   # открыта b; c, d ждут
+        self.reply_to_card("a")   # a не открыта — докрутка не началась, но колода её правит
+        p.poll()
+        self.assertEqual(p.st["revising"], {})
+        self.deck_revised("a", text="card a v2")
+        p.poll()
+        self.assertEqual([(x["ref"], x["text"]) for x in p.st["posts"]], [("a", "card a v2"), ("c", "card c"), ("d", "card d")])
+
+    def test_revised_card_that_waits_in_the_queue_moves_to_the_front(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.card("c"))
+        p.poll()
+        self.posts()
+        self.deck_revised("c", text="card c v2")
+        p.poll()
+        self.assertEqual([(x["ref"], x["text"]) for x in p.st["posts"]], [("c", "card c v2"), ("b", "card b")])
+
+    def test_cli_calls_a_waiting_or_forgotten_revised_card_revised(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.card("c"))
+        p.poll()
+        self.posts()
+        st = main.json.load(open(os.path.join(self.dir, "tg-posts", "state.json"), encoding="utf-8"))
+        got = cli.verdicts(self.dir, [{**self.card("c"), "fresh": True}, {**self.card("zz"), "fresh": True}])
+        self.assertEqual((got, st["open"]["ref"]), (["revised", "new"], "a"))
+
+    def test_reply_to_a_deck_card_passes_the_selected_quote_to_the_deck(self):
+        p = self.plugin()
+        self.queue(self.card("a"))
+        p.poll()
+        self.posts()
+        self.j.append("telegram.replied", None, {"ext": "tg-posts", "ref": "a", "text": "точка", "quote": " хвост подписи "},
+                      src="telegram")
+        p.poll()
+        self.assertEqual(self.deck.calls, [("/api/direct", {"id": "a", "text": "точка", "from": "tg-posts", "quote": "хвост подписи"})])
+
     def test_revised_card_already_open_or_waiting_is_not_duplicated(self):
         p = self.plugin()
         self.queue(self.card("a"), self.card("b"))
