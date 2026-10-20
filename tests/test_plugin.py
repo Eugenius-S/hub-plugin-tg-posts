@@ -411,6 +411,65 @@ class Process(Base):
         p.poll()
         self.assertEqual(([x["ref"] for x in p.st["posts"]], list(p.st["revising"])), ([], ["a"]))
 
+    def test_card_already_shown_never_comes_again_not_after_clear_or_restart(self):
+        # 20.10: smm-post-tinder сделал clear + deck — карточка из докрутки (владелец уже ответил на неё) ушла как новая
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.posts()
+        self.reply_to_card("a")
+        p.poll()
+        self.posts()
+        cli.put(self.dir, {"op": "clear"})
+        p.poll()
+        self.queue(self.card("a"), self.card("b"))   # deck без --id видит обе среди неоценённых
+        p.poll()
+        self.assertEqual((self.taken(), p.st["posts"], p.st["open"]), ([], [], None))
+        self.plugin().poll()
+        self.queue(self.card("a"))
+        p = self.plugin()
+        p.poll()
+        self.assertEqual((self.taken(), p.st["posts"]), ([], []))
+        self.assertEqual(cli.verdicts(self.dir, [{**self.card("a")}, {**self.card("c")}]), ["same", "new"])   # и CLI не врёт
+
+    def test_card_decided_with_a_button_never_comes_again_but_its_new_version_does(self):
+        p = self.plugin()
+        self.queue(self.card("a"))
+        p.poll()
+        self.posts()
+        self.press("a", "👎")
+        p.poll()
+        self.queue(self.card("a"))   # колода ещё держит её в списке (оценка не дошла или карточка вернулась)
+        p.poll()
+        self.assertEqual(self.taken(), [])
+        self.deck_revised("a", text="card a v2")   # новая версия по докрутке — единственное, что возвращает показанную
+        p.poll()
+        (a,) = self.posts()
+        self.assertEqual(a["text"], "card a v2")
+
+    def test_seen_cards_are_remembered_beyond_the_sent_window(self):
+        p = self.plugin()
+        self.queue(self.card("a"))
+        p.poll()
+        self.posts()
+        self.press("a", "❤️")
+        p.poll()
+        del p.st["sent"]["a"]   # sent короткий (KEEP_SENT) и общий с вариантами постов — по нему «видела» надолго не узнать
+        p.save()
+        self.queue(self.card("a"))
+        p = self.plugin()
+        p.poll()
+        self.assertEqual((self.taken(), p.st["posts"]), ([], []))
+
+    def test_old_state_without_seen_still_does_not_resend_cards_known_by_sent(self):
+        os.makedirs(os.path.join(self.dir, "tg-posts"))
+        with open(os.path.join(self.dir, "tg-posts", "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"seq": 0, "posts": [], "open": None, "sent": {"a": {"kind": "deck", "key": "a"}}}, f)
+        p = self.plugin()
+        self.queue(self.card("a"))
+        p.poll()
+        self.assertEqual((self.taken(), p.st["posts"]), ([], []))
+
     def test_revised_card_that_was_sent_before_and_is_not_tracked_is_queued_anew(self):
         p = self.plugin()
         self.queue(self.card("a"))

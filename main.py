@@ -18,7 +18,7 @@ EXT = "tg-posts"   # так его факты подписывает CLI (bin/tg
 NAME = os.environ.get("HUB_EXTENSION", EXT)
 LIKE, NOPE = "❤️", "👎"
 RETRY, GIVE_UP = 30, 3600   # с: повтор при лежащей колоде, сколько пытаться
-KEEP_SENT, KEEP_REVS, KEEP_REVISING = 300, 500, 100   # сколько ушедших постов, счётчиков версий и постов в докрутке помнить
+KEEP_SENT, KEEP_REVS, KEEP_REVISING, KEEP_SEEN = 300, 500, 100, 3000   # сколько ушедших постов, счётчиков версий, постов в докрутке и показанных карточек помнить
 REPLY_MARK = "(в ответ на пост "   # так бот помечает реплай на пост, ушедший сессии (modules/telegram/bot.py)
 
 
@@ -96,6 +96,7 @@ class Plugin:
         st.setdefault("open", None)
         st.setdefault("revising", {})   # ключ поста → пост, на который владелец ответил: ушёл сессии в докрутку, ждёт новой версии
         st.setdefault("sent", {})   # ref → что за пост ушёл (вариант или карточка): по нему узнаём нажатие
+        st.setdefault("seen", {})   # ref карточки колоды → когда она ушла владельцу: показанная не уходит второй раз (кроме новой версии по докрутке)
         st.setdefault("revs", {})   # ключ поста → сколько раз он уходил (новая версия — новый ref, старая кнопка не в счёт)
 
     def size(self):
@@ -215,7 +216,10 @@ class Plugin:
         emit(self.dir, "telegram.post", data)
         self.st["open"] = {**item, "ref": ref, "at": self.clock()}
         self.st["sent"][ref] = {"kind": item["kind"], "key": item["key"]}
-        for d, keep in ((self.st["sent"], KEEP_SENT), (self.st["revs"], KEEP_REVS)):
+        if item["kind"] == "deck":
+            self.st["seen"].pop(ref, None)
+            self.st["seen"][ref] = self.clock()
+        for d, keep in ((self.st["sent"], KEEP_SENT), (self.st["revs"], KEEP_REVS), (self.st["seen"], KEEP_SEEN)):
             while len(d) > keep:
                 del d[next(iter(d))]
 
@@ -245,6 +249,8 @@ class Plugin:
         if old is None:
             if item["kind"] == "deck" and any(j["body"].get("id") == item["ref"] for j in st["jobs"]):
                 return "same"   # оценка ещё не дошла до колоды — карточка у неё в списке неоценённых
+            if item["kind"] == "deck" and not fresh and self.shown(item["ref"]):
+                return "same"   # владелец её уже видел (оценил, ответил реплаем, clear сбросил очередь): второй раз не шлём
             st["posts"].append(item)
             return "new"
         if item["kind"] == "deck":
@@ -259,6 +265,10 @@ class Plugin:
         else:
             st["posts"][st["posts"].index(old)] = item
         return "revised"
+
+    def shown(self, ref):
+        """Карточка колоды уже уходила владельцу: seen помнит дольше, sent — запасной след (состояние до 0.4.1 seen не вело)."""
+        return ref in self.st["seen"] or (self.st["sent"].get(ref) or {}).get("kind") == "deck"
 
     def inbox(self):
         """Посты и команды от CLI: файлы в <плагин>/inbox, по порядку; разобранный файл удаляется после сохранения."""

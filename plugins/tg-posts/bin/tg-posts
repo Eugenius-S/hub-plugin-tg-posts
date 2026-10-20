@@ -77,7 +77,8 @@ def verdicts(state, items):
     for it in items:
         old = have.get(it["key"])
         if old is None:
-            out.append("new")
+            shown = it.get("ref") in (st.get("seen") or {}) or (st.get("sent") or {}).get(it.get("ref"), {}).get("kind") == "deck"
+            out.append("same" if it["kind"] == "deck" and not it.get("fresh") and shown else "new")   # показанную карточку плагин не шлёт второй раз
         elif it["kind"] == "deck":
             out.append("revised" if it.get("fresh") and it["key"] in (st.get("revising") or {}) else "same")
         else:
