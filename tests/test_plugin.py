@@ -176,6 +176,45 @@ class Cli(Base):
         self.assertNotIn("path", b)
         self.assertNotIn("session", a)   # нажатия и реплаи — плагину, не сессии
 
+    def test_deck_by_id_queues_those_cards_as_fresh_even_if_not_among_the_first_count(self):
+        cards = [{"id": f"c:{i}", "caption": f"Card {i}", "thumb": f"{i}.jpg"} for i in range(5)]
+        deck = Deck(cards)
+        try:
+            cli.main(["deck", "--url", deck.url, "--count", "1", "--id", "c:3", "c:1"])
+        finally:
+            deck.server.shutdown()
+        (cmd,) = self.inbox()
+        self.assertEqual([it["ref"] for it in cmd["items"]], ["c:3", "c:1"])
+        self.assertTrue(all(it["fresh"] and it["kind"] == "deck" for it in cmd["items"]))
+        self.assertTrue(cmd["items"][0]["path"].startswith(self.dir))
+
+    def test_deck_by_id_takes_a_new_picture_under_the_same_name(self):
+        deck = Deck([{"id": "c:1", "caption": "Card", "thumb": "x.jpg"}])
+        media = os.path.join(self.dir, "tg-posts", "media")
+        os.makedirs(media)
+        with open(os.path.join(media, "x.jpg"), "wb") as f:
+            f.write(b"stale")
+        try:
+            cli.main(["deck", "--url", deck.url, "--id", "c:1"])
+        finally:
+            deck.server.shutdown()
+        (cmd,) = self.inbox()
+        with open(cmd["items"][0]["path"], "rb") as f:
+            self.assertTrue(f.read().endswith(b"thumb"))   # картинка с сервера, а не старый файл из кэша
+
+    def test_deck_by_id_with_unknown_id_says_so_and_queues_the_rest(self):
+        deck = Deck([{"id": "c:1", "caption": "Card"}])
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                cli.main(["deck", "--url", deck.url, "--id", "c:1", "nope"])
+            self.assertIn("nope", buf.getvalue())
+            with self.assertRaises(SystemExit):
+                cli.main(["deck", "--url", deck.url, "--id", "nope"])
+        finally:
+            deck.server.shutdown()
+        self.assertEqual([it["ref"] for it in self.inbox()[0]["items"]], ["c:1"])
+
     def test_status_and_clear(self):
         with self.assertRaises(SystemExit):
             cli.main(["status"])   # плагин ещё не запускался
@@ -238,7 +277,7 @@ class Process(Base):
         self.assertEqual(self.deck.calls, [
             ("/api/decide", {"id": "reddit:t3_x", "verdict": "like"}),
             ("/api/decide", {"id": "arena:1", "verdict": "reject"}),
-            ("/api/direct", {"id": "arena:1", "text": "автора найти"})])
+            ("/api/direct", {"id": "arena:1", "text": "автора найти", "from": "tg-posts"})])
         self.plugin().poll()   # перезапуск — не повторяет
         self.assertEqual(len(self.deck.calls), 3)
 
@@ -292,18 +331,159 @@ class Process(Base):
         self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "like"}),
                                            ("/api/decide", {"id": "b", "verdict": "reject"})])
 
-    def test_reply_keeps_the_deck_card_open(self):
+    def reply_to_card(self, ref, text="автора"):
+        self.j.append("telegram.replied", None, {"ext": "tg-posts", "ref": ref, "text": text}, src="telegram")
+
+    def test_reply_to_the_open_deck_card_sends_it_for_revision_and_the_next_card_goes_at_once(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.card("c"))
+        p.poll()
+        self.posts()
+        self.reply_to_card("a")
+        p.poll()
+        self.assertEqual(self.deck.calls, [("/api/direct", {"id": "a", "text": "автора", "from": "tg-posts"})])
+        self.assertEqual([x["ref"] for x in self.posts()], ["b"])   # следующая ушла сразу, не ждёт кнопки
+        self.assertEqual(list(p.st["revising"]), ["a"])
+        self.assertEqual([x["ref"] for x in p.st["posts"]], ["c"])
+
+    def test_empty_reply_to_a_deck_card_changes_nothing(self):
         p = self.plugin()
         self.queue(self.card("a"), self.card("b"))
         p.poll()
         self.posts()
-        self.j.append("telegram.replied", None, {"ext": "tg-posts", "ref": "a", "text": "автора"}, src="telegram")
+        self.reply_to_card("a", text="  ")
         p.poll()
-        self.assertEqual(self.deck.calls, [("/api/direct", {"id": "a", "text": "автора"})])
-        self.assertEqual(self.posts(), [])   # реплай следующую не открывает
+        self.assertEqual((self.deck.calls, self.posts(), p.st["revising"]), ([], [], {}))
+
+    def deck_revised(self, *ids, text=None):
+        cli.put(self.dir, {"op": "post", "items": [{**self.card(i, **({"text": text} if text else {})), "fresh": True}
+                                                    for i in ids]})
+
+    def test_revised_deck_card_goes_first_in_the_queue_but_not_over_the_open_one(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.card("c"))
+        p.poll()
+        self.reply_to_card("a")
+        p.poll()
+        self.posts()
+        self.deck_revised("a", text="card a v2")
+        p.poll()
+        self.assertEqual(self.posts(), [])   # открыта b — её не вытесняем
+        self.assertEqual((p.st["open"]["ref"], [x["ref"] for x in p.st["posts"]], p.st["revising"]), ("b", ["a", "c"], {}))
+        self.assertEqual(p.st["posts"][0]["text"], "card a v2")
+        self.press("b", "❤️")
+        p.poll()
+        (a,) = self.posts()
+        self.assertEqual((a["ref"], a["text"]), ("a", "card a v2"))   # a раньше c
+
+    def test_revised_card_returns_even_if_the_text_did_not_change(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.reply_to_card("a")
+        p.poll()
+        self.posts()
+        self.deck_revised("a", text="card a")   # правка ничего не изменила — карточка всё равно не должна пропасть
+        p.poll()
+        self.assertEqual(([x["ref"] for x in p.st["posts"]], p.st["revising"]), (["a"], {}))
+
+    def test_revised_card_when_nothing_is_open_goes_out_at_once(self):
+        p = self.plugin()
+        self.queue(self.card("a"))
+        p.poll()
+        self.posts()
+        self.reply_to_card("a")
+        p.poll()
+        self.assertEqual((p.st["open"], self.taken()), (None, []))
+        self.deck_revised("a", text="card a v2")
+        p.poll()
+        (a,) = self.posts()
+        self.assertEqual((a["ref"], a["text"]), ("a", "card a v2"))
+
+    def test_plain_deck_run_does_not_bring_back_a_card_that_is_being_revised(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.reply_to_card("a")
+        p.poll()
+        self.posts()
+        self.queue(self.card("a"))   # deck без --id видит её среди неоценённых: старую версию не отдаём
+        p.poll()
+        self.assertEqual(([x["ref"] for x in p.st["posts"]], list(p.st["revising"])), ([], ["a"]))
+
+    def test_revised_card_that_was_sent_before_and_is_not_tracked_is_queued_anew(self):
+        p = self.plugin()
+        self.queue(self.card("a"))
+        p.poll()
+        self.posts()
         self.press("a", "👎")
         p.poll()
-        self.assertEqual([x["ref"] for x in self.posts()], ["b"])
+        self.deck_revised("a", text="card a v2")   # уже отправлялась и закрыта — всё равно встаёт
+        p.poll()
+        (a,) = self.posts()
+        self.assertEqual(a["text"], "card a v2")
+
+    def test_revised_card_already_open_or_waiting_is_not_duplicated(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.posts()
+        self.deck_revised("a", "b")
+        p.poll()
+        self.assertEqual(([x["ref"] for x in p.st["posts"]], p.st["open"]["ref"]), (["b"], "a"))
+
+    def test_button_under_a_deck_card_in_revision_closes_it_without_touching_the_open_one(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.card("c"))
+        p.poll()
+        self.reply_to_card("a")
+        p.poll()
+        self.posts()
+        self.deck.calls.clear()
+        self.press("a", "👎")
+        p.poll()
+        self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "reject"})])
+        self.assertEqual(([x for x in self.posts()], p.st["revising"], p.st["open"]["ref"], len(p.st["posts"])), ([], {}, "b", 1))
+
+    def test_button_under_the_old_message_of_a_card_whose_new_version_is_queued_closes_the_card(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.reply_to_card("a")
+        p.poll()
+        self.posts()
+        self.deck_revised("a", text="card a v2")
+        p.poll()
+        self.deck.calls.clear()
+        self.press("a", "❤️")   # ref карточки колоды один на все версии — кнопка под старым сообщением решает карточку
+        p.poll()
+        self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "like"})])
+        self.assertEqual(p.st["posts"], [])   # новая версия в очереди больше не нужна: она оценена
+
+    def test_revising_deck_card_survives_restart(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.reply_to_card("a")
+        p.poll()
+        self.taken()
+        p = self.plugin()
+        self.assertEqual(list(p.st["revising"]), ["a"])
+        self.deck_revised("a", text="card a v2")
+        p.poll()
+        self.assertEqual(([x["ref"] for x in p.st["posts"]], p.st["revising"]), (["a"], {}))
+
+    def test_second_reply_to_a_card_in_revision_goes_to_the_deck_and_keeps_it_in_revision(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.reply_to_card("a")
+        p.poll()
+        self.posts()
+        self.reply_to_card("a", text="ещё короче")
+        p.poll()
+        self.assertEqual([b["text"] for _, b in self.deck.calls], ["автора", "ещё короче"])
+        self.assertEqual((self.posts(), list(p.st["revising"])), ([], ["a"]))
 
     def test_draft_button_tells_the_session_and_sends_the_next(self):
         p = self.plugin()

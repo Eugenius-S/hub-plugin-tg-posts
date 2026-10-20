@@ -64,7 +64,7 @@ def request(ev):
         verdict = {LIKE: "like", NOPE: "reject"}.get(data.get("button"))
         return ("/api/decide", {"id": data["ref"], "verdict": verdict}) if verdict else None
     if ev.get("type") == "telegram.replied" and (data.get("text") or "").strip():
-        return "/api/direct", {"id": data["ref"], "text": data["text"].strip()}
+        return "/api/direct", {"id": data["ref"], "text": data["text"].strip(), "from": EXT}   # from — колода правит в фоне и сама вернёт карточку (tg-posts deck --id)
     return None
 
 
@@ -155,12 +155,19 @@ class Plugin:
                     if rev:
                         self.close(data["button"], rev)
             return
-        if ev.get("type") == "telegram.pressed" and now_open and now_open["ref"] == data["ref"] \
-                and data.get("button") in (LIKE, NOPE):
-            return self.close(data["button"])
+        if ev.get("type") == "telegram.pressed" and data.get("button") in (LIKE, NOPE):
+            if now_open and now_open["ref"] == data["ref"]:
+                return self.close(data["button"])
+            rev = self.st["revising"].get(data["ref"])
+            if rev and rev["kind"] == "deck":   # карточка в докрутке: кнопка под её сообщением закрывает карточку
+                return self.close(data["button"], rev)
+            # ref карточки колоды один на все версии: оценили — новая версия в очереди больше не нужна
+            self.st["posts"] = [p for p in self.st["posts"] if not (p["kind"] == "deck" and p["ref"] == data["ref"])]
         req = request(ev)
         if req:
             self.job(*req)
+            if req[0] == "/api/direct" and now_open and now_open["kind"] == "deck" and now_open["ref"] == data["ref"]:
+                self.revise()   # реплай на открытую карточку — докрутка: она уходит колоде, владельцу сразу следующая
 
     def job(self, path, body):
         self.st["jobs"].append({"path": path, "body": body, "since": self.clock(), "next": 0})
@@ -215,10 +222,17 @@ class Plugin:
     def enqueue(self, item):
         """→ 'new' | 'same' | 'revised'. Тот же пост (ключ) — не второй раз: карточка колоды уже тут — пропуск; вариант
         постов — новая версия заменяет ждущую в очереди или открытую (тогда она уходит заново, с кнопками); версия
-        докрученного (владелец ответил на него) встаёт в очереди первой, не вытесняя открытый."""
-        key, st = item["key"], self.st
+        докрученного (владелец ответил на него) встаёт в очереди первой, не вытесняя открытый. Карточка колоды в докрутке
+        возвращается только от колоды (fresh — `tg-posts deck --id`), даже если не изменилась; обычный `deck` её не берёт."""
+        key, st, fresh = item["key"], self.st, item.pop("fresh", False)
         o = st["open"]
         old = o if o and o["key"] == key else next((p for p in st["posts"] if p["key"] == key), None)
+        if old is None and key in st["revising"] and item["kind"] == "deck":
+            if not fresh:
+                return "same"
+            del st["revising"][key]
+            st["posts"].insert(0, item)
+            return "revised"
         if old is None and key in st["revising"] and item["kind"] == "drafts":   # докрученный: новая версия — первой за открытым
             old = st["revising"][key]
             if old.get("path") and not item.get("path"):

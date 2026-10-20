@@ -8,6 +8,8 @@
                                                                    — встанет в очереди первой, за открытым
     tg-posts deck [--count 10] [--url <адрес колоды>]             карточки колоды в очередь; ❤️ 👎 и реплаи плагин
                                                                    сам отдаёт серверу колоды, без хода сессии
+    tg-posts deck --id <id> [<id> …]                              докрученные колодой карточки (её сервер зовёт сам) —
+                                                                   в очереди первыми, сразу за открытой
     tg-posts status                                               что открыто, сколько в очереди и в докрутке
     tg-posts clear                                                сбросить очередь и открытый пост
 Только stdlib: сессия зовёт его как есть, без кода хаба на пути."""
@@ -77,7 +79,7 @@ def verdicts(state, items):
         if old is None:
             out.append("new")
         elif it["kind"] == "deck":
-            out.append("same")
+            out.append("revised" if it.get("fresh") and it["key"] in (st.get("revising") or {}) else "same")
         else:
             path, img = (it.get("path"), it.get("img")) if it.get("path") else (old.get("path"), old.get("img"))
             same = it["text"] == old.get("text") and path == old.get("path") and img == old.get("img")
@@ -169,13 +171,14 @@ def card_post(c, pic=None):
     return data
 
 
-def thumb(url, c, state):
-    """Превью карточки — с сервера колоды в папку плагина (бот грузит файл с диска); не вышло — пост без картинки."""
+def thumb(url, c, state, fresh=False):
+    """Превью карточки — с сервера колоды в папку плагина (бот грузит файл с диска); не вышло — пост без картинки.
+    fresh — карточка докручена: картинка могла смениться под тем же именем, кэш не берём."""
     name = c.get("thumb")
     if not name:
         return None
     path = os.path.join(state, EXT, "media", re.sub(r"[^\w.-]", "_", os.path.basename(name)))
-    if os.path.isfile(path):
+    if os.path.isfile(path) and not fresh:
         return path
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
@@ -198,6 +201,16 @@ def cmd_deck(a, state):
     except (OSError, ValueError) as e:
         sys.exit(f"колода {url} не отвечает: {e}")
     cards = (got.get("cards") if isinstance(got, dict) else got) or []   # там только неоценённые
+    if a.id:   # докрученные колодой: эти карточки, не первые N; в очереди — первыми за открытой
+        by_id = {c["id"]: c for c in cards if c.get("id")}
+        todo = [by_id[i] for i in dict.fromkeys(a.id) if i in by_id]
+        missing = [i for i in dict.fromkeys(a.id) if i not in by_id]
+        if not todo:
+            sys.exit(f"в колоде {url} нет неоценённых карточек: {', '.join(missing)}")
+        warn = enqueue(state, [{**card_post(c, thumb(url, c, state, fresh=True)), "fresh": True} for c in todo])
+        print(f"в очередь первыми: {len(todo)} карточек колоды {url}"
+              + (f"; нет среди неоценённых: {', '.join(missing)}" if missing else "") + warn)
+        return
     todo = [c for c in cards if c.get("id")][: a.count]
     warn = enqueue(state, [card_post(c, thumb(url, c, state)) for c in todo])
     print(f"в очередь: {len(todo)} из {len(cards)} карточек колоды {url}{warn}; в Telegram идёт по одному — следующая после "
@@ -239,6 +252,7 @@ def main(argv=None):
     k = sub.add_parser("deck")
     k.add_argument("--count", type=int, default=10)
     k.add_argument("--url")
+    k.add_argument("--id", nargs="+", action="extend")
     sub.add_parser("status")
     sub.add_parser("clear")
     a = p.parse_args(argv)
