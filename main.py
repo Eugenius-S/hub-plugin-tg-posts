@@ -19,6 +19,11 @@ NAME = os.environ.get("HUB_EXTENSION", EXT)
 LIKE, NOPE = "❤️", "👎"
 RETRY, GIVE_UP = 30, 3600   # с: повтор при лежащей колоде, сколько пытаться
 KEEP_SENT, KEEP_REVS, KEEP_REVISING, KEEP_SEEN = 300, 500, 100, 3000   # сколько ушедших постов, счётчиков версий, постов в докрутке и показанных карточек помнить
+WHY_HOLD = 1200   # с: отказ карточки колоды ждёт причину так долго, потом уходит без неё
+WHY_DECK = [("Баян", "stale"), ("Не наш голос", "off-brand"), ("Не дизайн", "not-design"),   # причины веб-тиндера (reason в /api/decide)
+            ("Слабый кадр", "weak-visual"), ("Мыльно", "soft"), ("Дубль", "dupe")]
+WHY_DRAFTS = ["Скучно", "Не по теме", "Слабая картинка", "Длинно", "Не наш тон"]
+WHY_ASK, WHY_SETTLE, KEEP_WHY = "Почему 👎? Кнопка — или реплаем своими словами.", "Почему: {}", 200
 REPLY_MARK = "(в ответ на пост "   # так бот помечает реплай на пост, ушедший сессии (modules/telegram/bot.py)
 
 
@@ -96,6 +101,8 @@ class Plugin:
         st.setdefault("open", None)
         st.setdefault("revising", {})   # ключ поста → пост, на который владелец ответил: ушёл сессии в докрутку, ждёт новой версии
         st.setdefault("sent", {})   # ref → что за пост ушёл (вариант или карточка): по нему узнаём нажатие
+        st.setdefault("why", {})   # ref вопроса «Почему?» → к чему он (карточка колоды или вариант постов): по нему узнаём причину
+        st.setdefault("why_n", 0)
         st.setdefault("seen", {})   # ref карточки колоды → когда она ушла владельцу: показанная не уходит второй раз (кроме новой версии по докрутке)
         st.setdefault("revs", {})   # ключ поста → сколько раз он уходил (новая версия — новый ref, старая кнопка не в счёт)
 
@@ -142,6 +149,12 @@ class Plugin:
         """Нажатие и реплай по ref: вариант постов знаем по `sent`, всё остальное (в том числе карточки колоды, ушедшие
         до очереди) — как раньше, колоде."""
         data, now_open = ev.get("data") or {}, self.st["open"]
+        if data.get("ext") == EXT and data.get("ref") in self.st["why"]:   # ответ на «Почему?»: кнопка или реплай словами
+            if ev.get("type") == "telegram.pressed":
+                self.answer_why(data["ref"], button=data.get("button"))
+            elif ev.get("type") == "telegram.replied" and (data.get("text") or "").strip():
+                self.answer_why(data["ref"], text=data["text"].strip())
+            return
         if now_open and now_open["kind"] == "drafts" and replied_ref(ev, now_open["session"]) == now_open["ref"]:
             return self.revise()
         if data.get("ext") != EXT or not data.get("ref"):
@@ -164,6 +177,9 @@ class Plugin:
                 return self.close(data["button"], rev)
             # ref карточки колоды один на все версии: оценили — новая версия в очереди больше не нужна
             self.st["posts"] = [p for p in self.st["posts"] if not (p["kind"] == "deck" and p["ref"] == data["ref"])]
+            if data["button"] == NOPE:
+                return self.reject_deck(data["ref"])
+            self.cancel_held(data["ref"])   # ❤️ после 👎 на той же карточке: ждущий отказ не нужен
         req = request(ev)
         if req:
             self.job(*req)
@@ -172,6 +188,65 @@ class Plugin:
 
     def job(self, path, body):
         self.st["jobs"].append({"path": path, "body": body, "since": self.clock(), "next": 0})
+
+    def ask_why(self, kind, o):
+        """После 👎 владельцу сразу уходит «Почему?» с кнопками причин (реплай — своими словами); очередь его не ждёт.
+        Бот заменяет вопрос строкой «Почему: …», когда ответили (settle). → ref вопроса."""
+        n = self.st["why_n"] = self.st["why_n"] + 1
+        ref = f"why:{o['ref'][:150]}#{n}"
+        self.st["why"][ref] = {"kind": kind, "ref": o["ref"], **{k: o[k] for k in ("session", "n", "title", "file") if o.get(k)}}
+        while len(self.st["why"]) > KEEP_WHY:
+            del self.st["why"][next(iter(self.st["why"]))]
+        emit(self.dir, "telegram.post", {"text": WHY_ASK, "ref": ref, "settle": WHY_SETTLE,
+                                         "buttons": [b for b, _ in WHY_DECK] if kind == "deck" else WHY_DRAFTS})
+        return ref
+
+    def held(self, ref):
+        return next((j for j in self.st["jobs"] if j.get("why") and j["body"].get("id") == ref), None)
+
+    def reject_deck(self, ref):
+        """👎 карточке колоды: отказ ждёт причину (колода принимает её вместе с отказом) не дольше WHY_HOLD, потом уходит
+        без неё. Второй 👎 на ту же карточку, пока вопрос открыт, второго вопроса не шлёт."""
+        if self.held(ref):
+            return
+        now = self.clock()
+        self.st["jobs"].append({"path": "/api/decide", "body": {"id": ref, "verdict": "reject"}, "since": now,
+                                "next": now + WHY_HOLD, "why": self.ask_why("deck", {"ref": ref})})
+
+    def cancel_held(self, ref):
+        job = self.held(ref)
+        if job:
+            self.st["jobs"].remove(job)
+            self.st["why"].pop(job["why"], None)
+
+    def answer_why(self, ref, button=None, text=None):
+        """Причина 👎: карточке колоды — reason (кнопка) или note через /api/comment (слова) и отказ уходит; варианту постов —
+        сообщением сессии, которая его пишет. Неизвестная кнопка вопрос не закрывает."""
+        w = self.st["why"].get(ref)
+        if not w:
+            return
+        deck = w["kind"] == "deck"
+        code = dict(WHY_DECK).get(button) if deck else button if button in WHY_DRAFTS else None
+        if not (text or code):
+            return
+        del self.st["why"][ref]
+        if deck:
+            job = next((j for j in self.st["jobs"] if j.get("why") == ref), None)
+            if job is None:   # отказ уже ушёл без причины (колода ждала дольше WHY_HOLD)
+                return
+            if text:
+                self.st["jobs"].insert(self.st["jobs"].index(job),
+                                       {"path": "/api/comment", "body": {"id": w["ref"], "comment": text},
+                                        "since": self.clock(), "next": 0})
+            else:
+                job["body"]["reason"] = code
+            del job["why"]
+            job["next"] = 0
+            return
+        emit(self.dir, "message.received", {
+            "to": w["session"], "channel": "session", "owner": False, "sender": NAME,
+            "text": f"tg-posts: причина, по которой владелец слил пост {w['n']} «{w['title']}» (файл {w['file']}): "
+                    f"{code or text}. Учти в следующих постах; пост не возвращай."})
 
     def revise(self):
         """Реплай на открытый вариант постов: он идёт в докрутку, а владельцу — следующий из очереди (пока сессия делает новую
@@ -191,7 +266,11 @@ class Plugin:
         else:
             self.st["revising"].pop(o["key"], None)
         if o["kind"] == "deck":
-            self.job("/api/decide", {"id": o["ref"], "verdict": "like" if button == LIKE else "reject"})
+            if button == LIKE:
+                self.cancel_held(o["ref"])
+                self.job("/api/decide", {"id": o["ref"], "verdict": "like"})
+            else:
+                self.reject_deck(o["ref"])
         else:
             left = len(self.st["posts"])
             tail = f" В очереди ещё {left}." if left else " Очередь пуста — можно присылать следующую."
@@ -200,6 +279,8 @@ class Plugin:
             emit(self.dir, "message.received", {
                 "to": o["session"], "channel": "session", "owner": False, "sender": NAME,
                 "text": f"tg-posts: владелец поставил {button} посту {o['n']} «{o['title']}» (файл {o['file']}): {what}.{tail}"})
+            if button == NOPE:
+                self.ask_why("drafts", o)
         self.pump()
 
     def pump(self):
@@ -300,14 +381,17 @@ class Plugin:
 
     def flush(self):
         """По порядку: не принятое ждёт повтора, а следующие — за ним (оценка и реплай к одной карточке не меняются местами)."""
-        now, left, changed = self.clock(), [], False
+        now, left, behind, changed = self.clock(), [], set(), False
         for job in self.st["jobs"]:
-            if left or job["next"] > now:
-                left.append(job)
+            if job["body"].get("id") in behind or job["next"] > now:
+                left.append(job)   # ждёт повтора или причины — следующие к той же карточке за ним, остальные идут
+                behind.add(job["body"].get("id"))
             elif self.post(job["path"], job["body"]):
                 changed = True
+                self.st["why"].pop(job.get("why"), None)   # ушёл без причины: вопрос уже ничего не изменит
             elif now - job["since"] < GIVE_UP:
                 left.append({**job, "next": now + RETRY})
+                behind.add(job["body"].get("id"))
                 changed = True
             else:
                 sys.stderr.write(f"tg-posts: {job['path']} {job['body'].get('id')}: колода не ответила за час — бросаю\n")

@@ -274,6 +274,8 @@ class Process(Base):
         self.j.append("telegram.replied", None, {"ext": "tg-posts", "ref": "arena:1", "text": " автора найти "},
                       src="telegram")
         p.poll()
+        self.now += main.WHY_HOLD   # отказ ждёт причину — реплай на ту же карточку за ним
+        p.poll()
         self.assertEqual(self.deck.calls, [
             ("/api/decide", {"id": "reddit:t3_x", "verdict": "like"}),
             ("/api/decide", {"id": "arena:1", "verdict": "reject"}),
@@ -286,6 +288,9 @@ class Process(Base):
         self.deck.down = True
         self.press("a", "❤️")
         self.press("gone", "👎")   # 404 — карточку уже оценили: не повторять
+        self.press("gone", "Дубль", ext="nobody")
+        p.poll()
+        self.now += main.WHY_HOLD
         p.poll()
         self.assertEqual(self.deck.calls, [])
         self.deck.down = False
@@ -311,7 +316,17 @@ class Process(Base):
                 "session": "smm", "file": "/w/d.md", "n": n, "title": "Пост", **kw}
 
     def posts(self):
+        return [x for x in self.sent() if not x["ref"].startswith("why:")]
+
+    def sent(self):
         return [e["data"] for e in self.taken() if e["type"] == "telegram.post"]
+
+    def whys(self):
+        """Вопросы «Почему?» после 👎 (то, что бот покажет владельцу)."""
+        return [x for x in self.sent() if x["ref"].startswith("why:")]
+
+    def session_said(self):
+        return [e["data"]["text"] for e in self.taken() if e["type"] == "message.received"]
 
     def test_queue_shows_one_card_and_the_next_only_after_the_button(self):
         p = self.plugin()
@@ -328,6 +343,9 @@ class Process(Base):
         self.press("b", "👎")
         p.poll()
         self.assertEqual([x["ref"] for x in self.posts()], ["c"])
+        self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "like"})])   # отказ ждёт причину
+        self.now += main.WHY_HOLD
+        p.poll()
         self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "like"}),
                                            ("/api/decide", {"id": "b", "verdict": "reject"})])
 
@@ -441,7 +459,9 @@ class Process(Base):
         p.poll()
         self.queue(self.card("a"))   # колода ещё держит её в списке (оценка не дошла или карточка вернулась)
         p.poll()
-        self.assertEqual(self.taken(), [])
+        self.assertEqual(self.posts(), [])
+        self.now += main.WHY_HOLD
+        p.poll()
         self.deck_revised("a", text="card a v2")   # новая версия по докрутке — единственное, что возвращает показанную
         p.poll()
         (a,) = self.posts()
@@ -477,6 +497,8 @@ class Process(Base):
         self.posts()
         self.press("a", "👎")
         p.poll()
+        self.now += main.WHY_HOLD   # причину не дали — отказ ушёл
+        p.poll()
         self.deck_revised("a", text="card a v2")   # уже отправлялась и закрыта — всё равно встаёт
         p.poll()
         (a,) = self.posts()
@@ -500,6 +522,8 @@ class Process(Base):
         self.posts()
         self.deck.calls.clear()
         self.press("a", "👎")
+        p.poll()
+        self.now += main.WHY_HOLD
         p.poll()
         self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "reject"})])
         self.assertEqual(([x for x in self.posts()], p.st["revising"], p.st["open"]["ref"], len(p.st["posts"])), ([], {}, "b", 1))
@@ -745,7 +769,7 @@ class Process(Base):
         (msg,) = [e for e in got if e["type"] == "message.received"]
         self.assertIn("слив", msg["data"]["text"])
         self.assertIn("1", msg["data"]["text"])
-        self.assertEqual([e for e in got if e["type"] == "telegram.post"], [])
+        self.assertEqual([e for e in got if e["type"] == "telegram.post" and not e["data"]["ref"].startswith("why:")], [])
         self.assertEqual((p.st["revising"], p.st["open"]["ref"], len(p.st["posts"])), ({}, "d.md #2 Пост", 1))
 
     def test_button_under_the_old_version_after_the_new_one_is_queued_counts_for_nothing(self):
@@ -847,6 +871,164 @@ class Process(Base):
             json.dump({"seq": 0, "queue": [job]}, f)
         self.plugin()
         self.assertEqual(self.deck.calls, [("/api/decide", {"id": "x", "verdict": "like"})])
+
+    DECK_WHY = ["Баян", "Не наш голос", "Не дизайн", "Слабый кадр", "Мыльно", "Дубль"]
+    DRAFTS_WHY = ["Скучно", "Не по теме", "Слабая картинка", "Длинно", "Не наш тон"]
+
+    def test_thumb_down_on_a_deck_card_asks_why_and_the_next_card_does_not_wait(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.posts()
+        self.press("a", "👎")
+        p.poll()
+        sent = self.sent()
+        self.assertEqual([x["ref"] for x in sent if not x["ref"].startswith("why:")], ["b"])   # следующая ушла сразу, не ждёт причины
+        self.assertEqual(self.deck.calls, [])   # отказ ждёт причину: колода принимает её вместе с отказом
+        (why,) = [x for x in sent if x["ref"].startswith("why:")]
+        self.assertEqual((why["buttons"], why["settle"]), (self.DECK_WHY, "Почему: {}"))
+        self.assertTrue(why["ref"].startswith("why:a"))
+        self.assertNotIn("path", why)
+        self.assertNotIn("session", why)   # реплай на вопрос — плагину, не сессии
+        self.press(why["ref"], "Баян")
+        p.poll()
+        self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "reject", "reason": "stale"})])
+        self.assertEqual(p.st["why"], {})
+
+    def test_reason_in_words_goes_to_the_deck_as_a_note_and_then_the_rejection(self):
+        p = self.plugin()
+        self.queue(self.card("a"))
+        p.poll()
+        self.posts()
+        self.press("a", "👎")
+        p.poll()
+        (why,) = self.whys()
+        self.reply_to_card(why["ref"], "  шутка не смешная ")
+        p.poll()
+        self.assertEqual(self.deck.calls, [("/api/comment", {"id": "a", "comment": "шутка не смешная"}),
+                                           ("/api/decide", {"id": "a", "verdict": "reject"})])
+
+    def test_unanswered_why_lets_the_rejection_go_without_a_reason_after_the_wait(self):
+        p = self.plugin()
+        self.queue(self.card("a"))
+        p.poll()
+        self.press("a", "👎")
+        p.poll()
+        (why,) = self.whys()
+        self.now += main.WHY_HOLD - 1
+        p.poll()
+        self.assertEqual(self.deck.calls, [])
+        self.now += 2
+        p.poll()
+        self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "reject"})])
+        self.press(why["ref"], "Баян")   # поздно: отказ уже ушёл — второго не будет
+        p.poll()
+        self.assertEqual(len(self.deck.calls), 1)
+
+    def test_like_after_thumb_down_on_the_same_card_replaces_the_pending_rejection(self):
+        p = self.plugin()
+        self.queue(self.card("a"))
+        p.poll()
+        self.press("a", "👎")
+        p.poll()
+        self.whys()
+        self.press("a", "❤️")
+        p.poll()
+        self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "like"})])
+        self.now += main.WHY_HOLD + 1
+        p.poll()
+        self.assertEqual(len(self.deck.calls), 1)
+
+    def test_second_thumb_down_does_not_ask_twice_and_other_cards_do_not_wait_behind_the_pending_one(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.press("a", "👎")
+        p.poll()
+        self.assertEqual(len(self.whys()), 1)
+        self.press("a", "👎")
+        self.press("b", "❤️")
+        p.poll()
+        self.assertEqual((self.whys(), self.deck.calls), ([], [("/api/decide", {"id": "b", "verdict": "like"})]))
+
+    def test_thumb_down_on_a_card_not_tracked_by_the_queue_also_asks_why(self):
+        p = self.plugin()
+        self.press("old", "👎")   # карточка ушла до очереди — состояния о ней нет
+        p.poll()
+        (why,) = self.whys()
+        self.assertEqual(why["buttons"], self.DECK_WHY)
+        self.assertEqual(self.deck.calls, [])
+
+    def test_thumb_down_under_a_card_in_revision_asks_why_too(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.reply_to_card("a")
+        p.poll()
+        self.taken()
+        self.press("a", "👎")
+        p.poll()
+        (why,) = self.whys()
+        self.press(why["ref"], "Дубль")
+        p.poll()
+        self.assertEqual(self.deck.calls[-1], ("/api/decide", {"id": "a", "verdict": "reject", "reason": "dupe"}))
+
+    def test_pending_rejection_and_question_survive_a_restart(self):
+        p = self.plugin()
+        self.queue(self.card("a"))
+        p.poll()
+        self.press("a", "👎")
+        p.poll()
+        (why,) = self.whys()
+        p = self.plugin()
+        self.press(why["ref"], "Мыльно")
+        p.poll()
+        self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "reject", "reason": "soft"})])
+
+    def test_thumb_down_on_a_draft_asks_why_and_the_reason_goes_to_the_session(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2))
+        p.poll()
+        self.taken()
+        self.press("d.md #1 Пост", "👎")
+        p.poll()
+        sent = self.sent()
+        self.assertEqual([x["ref"] for x in sent if not x["ref"].startswith("why:")], ["d.md #2 Пост"])   # очередь идёт как шла
+        (why,) = [x for x in sent if x["ref"].startswith("why:")]
+        self.assertEqual((why["buttons"], why["settle"]), (self.DRAFTS_WHY, "Почему: {}"))
+        self.assertNotIn("session", why)
+        self.press(why["ref"], "Скучно")
+        p.poll()
+        (said,) = [t for t in self.session_said() if "причина" in t]
+        self.assertIn("«Пост»", said)
+        self.assertIn("Скучно", said)
+        self.assertIn("/w/d.md", said)
+
+    def test_reason_in_words_for_a_draft_goes_to_the_session_as_is(self):
+        p = self.plugin()
+        self.queue(self.draft(1))
+        p.poll()
+        self.taken()
+        self.press("d.md #1 Пост", "👎")
+        p.poll()
+        (why,) = self.whys()
+        self.reply_to_card(why["ref"], "это уже было в сентябре")
+        p.poll()
+        (said,) = [t for t in self.session_said() if "причина" in t]
+        self.assertIn("это уже было в сентябре", said)
+        self.reply_to_card(why["ref"], "и ещё")   # вопрос закрыт — второй раз не отдаём
+        p.poll()
+        self.assertEqual(self.session_said(), [])
+
+    def test_thumb_up_does_not_ask_why(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.draft(1))
+        p.poll()
+        self.press("a", "❤️")
+        p.poll()
+        self.press("d.md #1 Пост", "❤️")
+        p.poll()
+        self.assertEqual(self.whys(), [])
 
     def test_first_run_starts_from_the_end_of_the_journal(self):
         self.press("old", "❤️")
