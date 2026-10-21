@@ -655,7 +655,7 @@ class Process(Base):
         self.assertEqual(([x["ref"] for x in p.st["posts"]], p.st["open"]["ref"]), (["b"], "a"))
 
     def test_new_version_of_the_open_deck_card_replaces_it_at_once_and_the_same_version_does_not(self):
-        # 20.10 t3_1wgycpb: реплай → карточка вернулась старой (открыта) → райтер переписал → deck --id молчал
+        # 20.10: реплай → карточка вернулась старой (открыта) → райтер переписал → deck --id молчал
         p = self.plugin()
         self.queue(self.card("a"), self.card("b"))
         p.poll()
