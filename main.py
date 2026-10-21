@@ -314,6 +314,18 @@ class Plugin:
         item = self.st["posts"].pop(0)
         rev = self.st["revs"][item["key"]] = self.st["revs"].get(item["key"], 0) + 1
         ref = item["ref"][:180] + (f" (v{rev})" if rev > 1 and item["kind"] == "drafts" else "")   # у колоды ref — id карточки
+        self.emit_post(item, ref)
+        self.st["open"] = {**item, "ref": ref, "at": self.clock()}
+        self.st["sent"][ref] = {"kind": item["kind"], "key": item["key"]}
+        if item["kind"] == "deck":
+            self.st["seen"].pop(ref, None)
+            self.st["seen"][ref] = self.clock()
+        for d, keep in ((self.st["sent"], KEEP_SENT), (self.st["revs"], KEEP_REVS), (self.st["seen"], KEEP_SEEN)):
+            while len(d) > keep:
+                del d[next(iter(d))]
+
+    def emit_post(self, item, ref):
+        """Пост в Telegram: подпись, кнопки ❤️ 👎, файл и сессия; у карточки колоды номер — из колоды в момент отправки."""
         data = {"text": item["text"], "ref": ref, "buttons": [LIKE, NOPE]}
         if item["kind"] == "deck":   # номер берём в момент отправки: для deck --id и после докрутки он свежий
             badge = self.badge(item["ref"])
@@ -323,14 +335,16 @@ class Plugin:
             if item.get(k):
                 data[k] = item[k]
         emit(self.dir, "telegram.post", data)
-        self.st["open"] = {**item, "ref": ref, "at": self.clock()}
-        self.st["sent"][ref] = {"kind": item["kind"], "key": item["key"]}
-        if item["kind"] == "deck":
-            self.st["seen"].pop(ref, None)
-            self.st["seen"][ref] = self.clock()
-        for d, keep in ((self.st["sent"], KEEP_SENT), (self.st["revs"], KEEP_REVS), (self.st["seen"], KEEP_SEEN)):
-            while len(d) > keep:
-                del d[next(iter(d))]
+
+    def again(self, ref=""):
+        """`tg-posts again`: открытый пост уходит в Telegram ещё раз — новым сообщением внизу, с тем же ref. Бот узнаёт кнопки и
+        реплаи по ref, поэтому старое и новое сообщение — один и тот же пост. Состояние (открытый, очередь, seen, revs) не
+        меняется: следующий не выпускается, версия не новая. → True — отправлено; нет открытого или ref не его — False."""
+        o = self.st["open"]
+        if o is None or ref not in ("", o["ref"], o["key"]):
+            return False
+        self.emit_post(o, o["ref"])
+        return True
 
     def enqueue(self, item):
         """→ 'new' | 'same' | 'revised'. Тот же пост (ключ) — не второй раз: карточка колоды уже тут — пропуск; вариант
@@ -404,6 +418,8 @@ class Plugin:
                     cmd = json.load(f)
                 if cmd.get("op") == "clear":
                     self.st["posts"], self.st["open"], self.st["revising"] = [], None, {}
+                elif cmd.get("op") == "again":
+                    self.again(str(cmd.get("ref") or ""))
                 elif cmd.get("op") == "close":
                     self.close_quiet(str(cmd.get("ref") or ""))
                 else:

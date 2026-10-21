@@ -1188,6 +1188,122 @@ class Process(Base):
         p.poll()
         self.assertEqual(self.whys(), [])
 
+    def again(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["again", *args])
+        return out.getvalue()
+
+    def test_again_sends_the_open_deck_card_once_more_with_a_fresh_badge_and_changes_nothing_else(self):
+        p = self.plugin()
+        self.deck.badge = {"text": "7 из 21"}
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        (first,) = self.posts()
+        before = json.loads(json.dumps(p.st))
+        self.deck.badge = {"text": "9 из 21"}
+        self.assertIn("отправляю ещё раз", self.again())
+        p.poll()
+        (again,) = self.posts()
+        self.assertEqual((again["ref"], again["text"], again["buttons"]), (first["ref"], "9 из 21\n\ncard a", ["❤️", "👎"]))
+        self.assertEqual(first["text"], "7 из 21\n\ncard a")
+        self.assertEqual(p.st, before)   # открытый, очередь, seen, revs, sent — как были: следующий не вышел
+        self.assertEqual(self.deck.calls, [])
+        self.assertEqual(self.again("a")[:12], "a: отправляю")   # и по ref — тоже, сколько угодно раз
+        p.poll()
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_again_keeps_picture_video_and_session_of_a_draft_and_its_versioned_ref(self):
+        p = self.plugin()
+        self.queue(self.draft(1, path="/w/p.png", img="x"), self.draft(2))
+        p.poll()
+        self.taken()
+        self.queue(self.draft(1, "1. Пост\n\nновый", path="/w/p.png", img="y"))   # новая версия открытого — v2
+        p.poll()
+        (v2,) = self.posts()
+        self.assertEqual(v2["ref"], "d.md #1 Пост (v2)")
+        self.again("d.md #1 Пост")   # ref без «(v2)» — не открытый: слать нечего
+        p.poll()
+        self.assertEqual(self.posts(), [])
+        self.again("/w/d.md#1")   # ключ поста — открытый
+        p.poll()
+        (again,) = self.posts()
+        self.assertEqual((again["ref"], again["path"], again["session"], again["text"]),
+                         ("d.md #1 Пост (v2)", "/w/p.png", "smm", "1. Пост\n\nновый"))
+        self.assertEqual((p.st["open"]["ref"], p.st["revs"]["/w/d.md#1"]), ("d.md #1 Пост (v2)", 2))
+
+    def test_again_does_not_count_as_the_same_version_nothing(self):
+        # та же версия от drafts/deck — «без изменений», а again — всегда в Telegram
+        p = self.plugin()
+        self.queue(self.draft(1))
+        p.poll()
+        self.taken()
+        self.queue(self.draft(1))
+        p.poll()
+        self.assertEqual(self.posts(), [])
+        self.again()
+        p.poll()
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_reply_and_button_work_on_the_old_and_the_new_message_of_the_same_post(self):
+        # бот узнаёт оба сообщения по ref, плагин — по тому же ref: реплай и кнопка на старом не отличаются от нового
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.posts()
+        self.again()
+        p.poll()
+        self.assertEqual(len(self.posts()), 1)
+        self.reply_to_card("a")   # реплай — докрутка: открытая уходит колоде, владельцу — следующая, как без again
+        p.poll()
+        self.assertEqual(self.deck.calls, [("/api/direct", {"id": "a", "text": "автора", "from": "tg-posts"})])
+        self.assertEqual([x["ref"] for x in self.posts()], ["b"])
+        self.deck.calls.clear()
+        self.press("a", "❤️")   # кнопка под любым из двух сообщений закрывает карточку в докрутке
+        p.poll()
+        self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "like"})])
+        self.assertEqual(p.st["open"]["ref"], "b")
+
+    def test_button_on_the_resent_draft_closes_it_and_sends_the_next(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2))
+        p.poll()
+        self.taken()
+        self.again()
+        p.poll()
+        self.taken()
+        self.press("d.md #1 Пост", "❤️")
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["d.md #2 Пост"])
+
+    def test_again_without_an_open_post_or_for_another_ref_sends_nothing_and_says_so(self):
+        self.assertIn("состояния плагина нет", self.exit_text(lambda: self.again()))   # плагин ещё не вёл состояния
+        p = self.plugin()
+        self.assertIn("нет открытого поста", self.again())
+        self.queue(self.card("a"))
+        p.poll()
+        self.posts()
+        self.assertIn("b не открыт", self.again("b"))
+        self.assertEqual(self.inbox_names(), [])   # в ящик не легло
+        p.poll()
+        self.assertEqual(self.taken(), [])
+        cli.put(self.dir, {"op": "again", "ref": "b"})   # гонка: открыт уже другой — плагин тоже молчит
+        cli.put(self.dir, {"op": "clear"})
+        cli.put(self.dir, {"op": "again", "ref": ""})
+        p.poll()
+        self.assertEqual((self.taken(), p.st["open"]), ([], None))
+
+    def exit_text(self, fn):
+        try:
+            fn()
+        except SystemExit as e:
+            return str(e)
+        return ""
+
+    def inbox_names(self):
+        d = os.path.join(self.dir, "tg-posts", "inbox")
+        return [n for n in os.listdir(d) if n.endswith(".json")] if os.path.isdir(d) else []
+
     def test_first_run_starts_from_the_end_of_the_journal(self):
         self.press("old", "❤️")
         self.plugin().poll()

@@ -12,6 +12,7 @@
                                                                    в очереди первыми, сразу за открытой
     tg-posts status                                               что открыто, сколько в очереди и в докрутке
     tg-posts clear                                                сбросить очередь и открытый пост
+    tg-posts again [<ref>]                                        открытый пост — в Telegram ещё раз, новым сообщением внизу (напомнить о нём); тот же пост, очередь не двигается
     tg-posts close <ref>                                          закрыть пост без оценки колоде (её уже поставили в колоде); открытый — следующий уходит сразу
 Только stdlib: сессия зовёт его как есть, без кода хаба на пути."""
 import argparse
@@ -255,6 +256,23 @@ def cmd_close(a, state):
     print(f"{a.ref}: закрыта в плагине без оценки колоде; если она была открыта — владельцу уходит следующая")
 
 
+def cmd_again(a, state):
+    """Состояние плагина — только чтение (как status): нет открытого поста или ref не открыт — ничего не кладём в ящик."""
+    try:
+        with open(os.path.join(state, EXT, "state.json"), encoding="utf-8") as f:
+            o = json.load(f).get("open")
+    except (OSError, ValueError):
+        sys.exit("состояния плагина нет: процесс плагина не запущен или ещё ничего не получал")
+    if not isinstance(o, dict):
+        print("нет открытого поста — слать нечего")
+        return
+    if a.ref and a.ref not in (o.get("ref"), o.get("key")):
+        print(f"{a.ref} не открыт (открыт: {o.get('ref')}) — слать нечего")
+        return
+    put(state, {"op": "again", "ref": o["ref"]})
+    print(f"{o['ref']}: отправляю ещё раз новым сообщением; это тот же пост — кнопки и реплаи на старом и новом сообщении относятся к нему, очередь не двигается")
+
+
 def cmd_clear(a, state):
     put(state, {"op": "clear"})
     print("очередь и открытый пост сброшены (сообщения, уже висящие в Telegram, остаются)")
@@ -274,13 +292,15 @@ def main(argv=None):
     k.add_argument("--id", nargs="+", action="extend")
     c = sub.add_parser("close")
     c.add_argument("ref")
+    g = sub.add_parser("again")
+    g.add_argument("ref", nargs="?")
     sub.add_parser("status")
     sub.add_parser("clear")
     a = p.parse_args(argv)
     state = os.environ.get("HUB_STATE_DIR")
     if not state:
         sys.exit("нужен HUB_STATE_DIR (в сессии хаба он есть)")
-    {"drafts": cmd_drafts, "deck": cmd_deck, "status": cmd_status, "clear": cmd_clear, "close": cmd_close}[a.cmd](a, state)
+    {"drafts": cmd_drafts, "deck": cmd_deck, "status": cmd_status, "clear": cmd_clear, "close": cmd_close, "again": cmd_again}[a.cmd](a, state)
 
 
 if __name__ == "__main__":
