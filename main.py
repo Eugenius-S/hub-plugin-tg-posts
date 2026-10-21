@@ -27,7 +27,7 @@ RETRY, GIVE_UP = 30, 3600   # s: retry while the deck is down, how long to keep 
 KEEP_SENT, KEEP_REVS, KEEP_REVISING, KEEP_SEEN = 300, 500, 100, 3000   # how many sent posts, version counters, posts in revision and shown cards to remember
 BADGE_WAIT, BADGE_MAX = 3, 40   # s: how long to wait for the card number from the deck; characters in the number line
 WHY_HOLD = 1200   # s: a deck card rejection waits this long for a reason, then goes out without one
-WHY_DECK = ["stale", "off-brand", "not-design", "weak-visual", "soft", "dupe"]   # reasons of the deck web UI: reason codes in /api/decide, STR key suffixes
+WHY_DECK = ["stale", "off-brand", "not-design", "weak-visual", "soft", "dupe", "boring", "changed-mind"]   # reasons of the deck web UI: reason codes in /api/decide, STR key suffixes
 WHY_DRAFTS = ["bored", "off-topic", "weak-image", "long", "off-tone"]   # reasons for a draft post: STR key suffixes
 KEEP_WHY = 200
 
@@ -53,6 +53,8 @@ STR = {
         "why_deck_weak-visual": "Weak visual",
         "why_deck_soft": "Blurry",
         "why_deck_dupe": "Dupe",
+        "why_deck_boring": "Boring",
+        "why_deck_changed-mind": "Changed my mind",
         "why_drafts_bored": "Boring",
         "why_drafts_off-topic": "Off-topic",
         "why_drafts_weak-image": "Weak image",
@@ -68,6 +70,8 @@ STR = {
         "why_deck_weak-visual": "Слабый кадр",
         "why_deck_soft": "Мыльно",
         "why_deck_dupe": "Дубль",
+        "why_deck_boring": "Скучно",
+        "why_deck_changed-mind": "Передумал",
         "why_drafts_bored": "Скучно",
         "why_drafts_off-topic": "Не по теме",
         "why_drafts_weak-image": "Слабая картинка",

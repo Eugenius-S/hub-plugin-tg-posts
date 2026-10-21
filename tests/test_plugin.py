@@ -1040,7 +1040,7 @@ class Process(Base):
         self.plugin()
         self.assertEqual(self.deck.calls, [("/api/decide", {"id": "x", "verdict": "like"})])
 
-    DECK_WHY = ["Stale", "Not our voice", "Not design", "Weak visual", "Blurry", "Dupe"]
+    DECK_WHY = ["Stale", "Not our voice", "Not design", "Weak visual", "Blurry", "Dupe", "Boring", "Changed my mind"]
     DRAFTS_WHY = ["Boring", "Off-topic", "Weak image", "Too long", "Not our tone"]
 
     def test_thumb_down_on_a_deck_card_asks_why_and_the_next_card_does_not_wait(self):
@@ -1141,6 +1141,23 @@ class Process(Base):
         p.poll()
         self.assertEqual(self.deck.calls[-1], ("/api/decide", {"id": "a", "verdict": "reject", "reason": "dupe"}))
 
+    def test_boring_and_changed_mind_go_to_the_deck_as_reason_codes(self):
+        self.assertEqual(main.WHY_DECK[-2:], ["boring", "changed-mind"])
+        self.assertEqual(len(main.WHY_DECK), 8)   # the bot shows at most 8 buttons, three in a row
+        for lang, boring, changed in (("en", "Boring", "Changed my mind"), ("ru", "Скучно", "Передумал")):
+            self.assertEqual(main.why_buttons("deck", lang)[-2:], [boring, changed])
+        for button, code in (("Boring", "boring"), ("Передумал", "changed-mind")):
+            self.deck.calls.clear()
+            p = self.plugin()
+            self.queue(self.card("a"))
+            p.poll()
+            self.press("a", "👎")
+            p.poll()
+            (why,) = self.whys()
+            self.press(why["ref"], button)
+            p.poll()
+            self.assertEqual(self.deck.calls[-1], ("/api/decide", {"id": "a", "verdict": "reject", "reason": code}))
+
     def test_pending_rejection_and_question_survive_a_restart(self):
         p = self.plugin()
         self.queue(self.card("a"))
@@ -1188,7 +1205,7 @@ class Process(Base):
         p.poll()
         self.assertEqual(self.session_said(), [])
 
-    RU_DECK_WHY = ["Баян", "Не наш голос", "Не дизайн", "Слабый кадр", "Мыльно", "Дубль"]
+    RU_DECK_WHY = ["Баян", "Не наш голос", "Не дизайн", "Слабый кадр", "Мыльно", "Дубль", "Скучно", "Передумал"]
     RU_DRAFTS_WHY = ["Скучно", "Не по теме", "Слабая картинка", "Длинно", "Не наш тон"]
 
     @staticmethod
