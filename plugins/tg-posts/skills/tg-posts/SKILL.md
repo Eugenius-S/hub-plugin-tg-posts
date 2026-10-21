@@ -68,6 +68,7 @@ on it. A card already standing in the queue does not stand a second time.
 python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" status   # what is open and how many wait
 python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" clear    # reset the queue and the open post (only on the owner's word)
 python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" again    # remind: the open post - to Telegram once more, as a new message at the bottom (ref <ref> - if a specific one is needed)
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" reply <ref> "<text>"   # answer the owner's question about a post: in Telegram as a reply to that post (not hub notify)
 ```
 
 The queue and the posts in revision live in the plugin and survive a hub restart. An open post without an answer for a

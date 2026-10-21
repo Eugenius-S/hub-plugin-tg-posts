@@ -1448,6 +1448,35 @@ class Process(Base):
         p.poll()
         self.assertEqual((self.taken(), p.st["open"]), ([], None))
 
+    def answer(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["reply", *args])
+        return out.getvalue()
+
+    def test_reply_answers_the_owner_under_the_card_and_moves_nothing(self):
+        # the deck answers the owner's question about a card: to Telegram as a reply to the card (reply_text - the bot finds its
+        # latest message by ref), the full text with the card's caption first - for a bot that does not know reply_text
+        p = self.plugin()
+        self.queue(self.card("a", text="Phone of the post office\n\nlong story"), self.card("b"))
+        p.poll()
+        self.posts()
+        self.reply_to_card("a", "why is it so?")
+        p.poll()
+        self.posts()   # a reply is a revision: b goes out
+        before = json.loads(json.dumps(p.st))
+        self.assertIn("a: the answer goes", self.answer("a", "The source does not say."))
+        p.poll()
+        (answer,) = self.posts()
+        self.assertEqual(answer, {"ref": "a", "reply_text": "The source does not say.",
+                                  "text": "Phone of the post office\n\nThe source does not say."})
+        self.assertEqual(p.st, before)   # open, queue, revision - as they were
+        self.answer("gone", "unknown card")   # not in the plugin any more - the ref is the caption
+        p.poll()
+        (alone,) = self.posts()
+        self.assertEqual((alone["ref"], alone["text"]), ("gone", "gone\n\nunknown card"))
+        self.assertIn("empty", self.exit_text(lambda: self.answer("a", "  ")))
+
     def exit_text(self, fn):
         try:
             fn()

@@ -15,6 +15,8 @@ post in Telegram - the next one goes out when this one is closed with the ❤️
     tg-posts clear                                                  reset the queue and the open post
     tg-posts again [<ref>]                                          the open post - to Telegram once more, as a new message at the bottom (to remind about it); the same post, the queue does not move
     tg-posts close <ref>                                            close a post without a rating to the deck (it is already rated in the deck); the open one - the next goes out at once
+    tg-posts reply <ref> "<text>"                                   an answer to the owner's question about a post - in Telegram as a reply to the post's
+                                                                    latest message (no post in the chat - a message with its caption first); the queue does not move
 Stdlib only: a session calls it as is, without hub code on the path."""
 import argparse
 import hashlib
@@ -275,6 +277,14 @@ def cmd_again(a, state):
     print(f"{o['ref']}: sending it once more as a new message; it is the same post - buttons and replies on the old and the new message belong to it, the queue does not move")
 
 
+def cmd_reply(a, state):
+    text = " ".join(a.text).strip()
+    if not text:
+        sys.exit("the answer is empty: tg-posts reply <ref> \"<text>\"")
+    put(state, {"op": "reply", "ref": a.ref, "text": text})
+    print(f"{a.ref}: the answer goes to the owner in Telegram as a reply to this post")
+
+
 def cmd_clear(a, state):
     put(state, {"op": "clear"})
     print("the queue and the open post are reset (messages already hanging in Telegram stay)")
@@ -296,13 +306,17 @@ def main(argv=None):
     c.add_argument("ref")
     g = sub.add_parser("again")
     g.add_argument("ref", nargs="?")
+    r = sub.add_parser("reply")
+    r.add_argument("ref")
+    r.add_argument("text", nargs="+")
     sub.add_parser("status")
     sub.add_parser("clear")
     a = p.parse_args(argv)
     state = os.environ.get("HUB_STATE_DIR")
     if not state:
         sys.exit("HUB_STATE_DIR is required (a hub session has it)")
-    {"drafts": cmd_drafts, "deck": cmd_deck, "status": cmd_status, "clear": cmd_clear, "close": cmd_close, "again": cmd_again}[a.cmd](a, state)
+    {"drafts": cmd_drafts, "deck": cmd_deck, "status": cmd_status, "clear": cmd_clear, "close": cmd_close, "again": cmd_again,
+     "reply": cmd_reply}[a.cmd](a, state)
 
 
 if __name__ == "__main__":

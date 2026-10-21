@@ -3,7 +3,7 @@
   "icon": "icon.png",
   "description": "Posts to the owner in Telegram one at a time: a queue, one unreviewed post hangs in Telegram, the next one comes after a ❤️ or 👎 or a reply; a reply is a revision (it goes to the session, the next post goes out at once, the new version stands first in the queue); deck cards work the same way: a reply is a revision on the deck server, the edited card comes back first; the plugin passes the card ratings to the deck server itself",
   "why": "Review post variants one at a time from a phone: ❤️ approve, 👎 reject, a reply to revise - the next one comes at once, and the new version stands first in the queue",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "i18n": {"ru": {"description": "Посты владельцу в Telegram по одному: очередь, в Telegram висит один неразобранный пост, следующий — после ❤️ или 👎 или реплая; реплай — докрутка (идёт сессии, следующий пост уходит сразу, новая версия встаёт в очереди первой); у карточек колоды то же: реплай — докрутка на сервере колоды, правленая карточка возвращается первой; оценку карточек плагин сам отдаёт серверу колоды", "why": "Разобрать варианты постов с телефона по одному: ❤️ принять, 👎 слить, реплаем докрутить — следующий придёт сразу, а новая версия встанет в очереди первой"}},
   "hub": "^1.15",
   "run": ["python3", "main.py"],

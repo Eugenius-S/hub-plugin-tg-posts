@@ -37,6 +37,11 @@ Telegram, and the next one goes out when this one is closed with a ❤️ or �
   post; no open post or the ref is not open - it sends nothing and says so), `tg-posts close <ref>` - close one post
   without a rating to the deck (it is already rated in the deck or on the page): an open one - the owner immediately
   gets the next one.
+- **Answer under a post.** `tg-posts reply <ref> "<text>"` - an answer to the owner's question about a post (a reply
+  to a deck card goes to the deck server; its answer goes back this way): in Telegram as a reply to the post's latest
+  message, and a reply to the answer comes back to the post. No post in the chat - a message with the post's caption
+  first. The queue does not move. Needs a hub with `reply_text` in telegram.post; an older one sends the caption and the
+  answer as a plain message.
 
 Needs a hub with the `telegram.post` fact (the Telegram module sends a post, a press is `telegram.pressed`, a reply is
 `telegram.replied`; the plugin recognizes a reply to a draft post by the bot's message to the session with a note that it

@@ -30,6 +30,7 @@ WHY_HOLD = 1200   # s: a deck card rejection waits this long for a reason, then 
 WHY_DECK = ["stale", "off-brand", "not-design", "weak-visual", "soft", "dupe", "boring", "changed-mind"]   # reasons of the deck web UI: reason codes in /api/decide, STR key suffixes
 WHY_DRAFTS = ["bored", "off-topic", "weak-image", "long", "off-tone"]   # reasons for a draft post: STR key suffixes
 KEEP_WHY = 200
+HEAD_MAX = 200   # the post caption's first line above an answer (tg-posts reply)
 
 
 def _cp(*codes):
@@ -433,6 +434,21 @@ class Plugin:
         self.emit_post(o, o["ref"])
         return True
 
+    def answer(self, ref, text):
+        """`tg-posts reply`: an answer to the owner's question about a post - to Telegram as a reply to the post's latest
+        message (reply_text: the bot finds it by ref, a reply to the answer comes back here by the same ref). text - the whole
+        answer with the post's caption first: the bot sends it when the post is not in the chat (or does not know reply_text).
+        The queue does not move."""
+        text = text.strip()
+        if not ref or not text:
+            return False
+        o = next((p for p in (self.st["open"], *self.st["revising"].values(), *self.st["posts"])
+                  if p and ref in (p["ref"], p["key"])), None)
+        head = next((ln.strip() for ln in str((o or {}).get("text") or "").splitlines() if ln.strip()), "") or ref
+        emit(self.dir, "telegram.post", {"text": f"{head[:HEAD_MAX]}\n\n{text}", "reply_text": text,
+                                         "ref": o["ref"] if o else ref})
+        return True
+
     def enqueue(self, item):
         """-> 'new' | 'same' | 'revised'. The same post (key) - not a second time: a deck card already here - skipped; a draft
         post - the new version replaces the one waiting in the queue or the open one (then it goes out again, with buttons); the
@@ -507,6 +523,8 @@ class Plugin:
                     self.st["posts"], self.st["open"], self.st["revising"] = [], None, {}
                 elif cmd.get("op") == "again":
                     self.again(str(cmd.get("ref") or ""))
+                elif cmd.get("op") == "reply":
+                    self.answer(str(cmd.get("ref") or ""), str(cmd.get("text") or ""))
                 elif cmd.get("op") == "close":
                     self.close_quiet(str(cmd.get("ref") or ""))
                 else:
