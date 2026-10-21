@@ -1,69 +1,75 @@
 ---
 name: tg-posts
-description: Отправить владельцу в Telegram варианты постов или карточки колоды — по одному, с кнопками ❤️ 👎. Используй, когда владелец просит прислать посты в Telegram, чтобы разобрать их с телефона; и когда пришло сообщение tg-posts о ❤️ / 👎 или реплай на пост.
+description: Send the owner draft posts or deck cards in Telegram, one at a time, with ❤️ 👎 buttons. Use it when the owner asks to send posts to Telegram to review them from a phone, and when a tg-posts message about ❤️ / 👎 or a reply to a post arrives.
 ---
 
-# Посты в Telegram
+# Posts in Telegram
 
-Посты идут владельцу **по одному**. Команды кладут их в очередь плагина; в Telegram висит один неразобранный пост
-(картинка, подпись, кнопки ❤️ 👎), следующий уходит, когда этот закрыт кнопкой или владелец ответил на него реплаем. Сам ничего не ждёшь и не досылаешь:
-клади в очередь всю партию сразу.
+Posts go to the owner **one at a time**. The commands put them into the plugin's queue; one unreviewed post hangs in
+Telegram (a picture, a caption, ❤️ 👎 buttons), and the next one goes out when this one is closed with a button or the
+owner replied to it. You wait for nothing and send nothing later: put the whole batch into the queue at once.
 
-## Варианты постов из файла черновиков
+## Draft posts from a drafts file
 
-Посты в файле — разделы `## N. Название`; в Telegram уходит «N. Название» и тело раздела. Картинку к посту называешь сам:
+Posts in the file are sections `## N. Title`; Telegram gets "N. Title" and the body of the section. You name the picture
+for a post yourself:
 
 ```
-python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" drafts <полный путь к drafts.md> \
-  --image 3=<полный путь к картинке> --image 5=<…> [--only 3,5,7]
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" drafts <full path to drafts.md> \
+  --image 3=<full path to the picture> --image 5=<...> [--only 3,5,7]
 ```
 
-- `--image N=<путь>` — картинка поста N (png, jpg, webp до 10 МБ); без неё пост уходит текстом.
-- `--only` — только эти номера; без него — все разделы файла.
-- Текст длиннее 1000 знаков — картинка, следом текст отдельным сообщением.
+- `--image N=<path>` - the picture of post N (png, jpg, webp up to 10 MB); without it the post goes as text.
+- `--only` - only these numbers; without it - all sections of the file.
+- Text longer than 1000 characters - the picture, then the text as a separate message.
 
-Что приходит тебе:
+What comes to you:
 
-- **❤️ или 👎** — сообщение «tg-posts: владелец поставил ❤️ / 👎 посту N «Название» (файл …)». ❤️ — принят: отметь в
-  файле. 👎 — категорический слив: убери пост из файла и не возвращайся к нему. В конце — сколько ещё в очереди;
-  следующий пост уже ушёл владельцу.
-- **Причина 👎** — сообщение «tg-posts: причина, по которой владелец слил пост N «Название» (файл …): …». Учти в следующих
-  постах; слитый пост не возвращай. Владелец отвечает кнопкой или словами; может и не ответить.
-- **Реплай на пост** (слова или голос, с пометкой `(в ответ на пост <файл> #N Название, файл <путь>)`) — докрутка. Владельцу
-  сразу уходит следующий пост из очереди — **после реплая следующий пост уже ушёл**. Доработай пост и пришли **новую
-  версию как обычно**: та же команда с `--only N` (и `--image N=…`, если картинка новая; без неё остаётся прежняя) —
-  версия встанет в очереди **следующей**, сразу за открытым постом, и уйдёт, когда он разобран:
+- **❤️ or 👎** - a message "tg-posts: the owner gave post N "Title" (file ...) a ❤️ / 👎: ...". ❤️ - approved: mark it in
+  the file. 👎 - rejected outright: remove the post from the file and do not return to it. At the end - how many are
+  still in the queue; the next post has already gone to the owner.
+- **The reason for 👎** - a message "tg-posts: the reason the owner rejected post N "Title" (file ...): ...". Take it into
+  account in the next posts; do not bring the rejected post back. The owner answers with a button or in words; they may
+  not answer at all.
+- **A reply to a post** (words or voice, with a note appended by the bot - today it is worded in Russian, meaning "in
+  reply to post <file> #N Title, file <path>") - revision. The next post from the queue goes to the owner at once -
+  **after a reply the next post has already gone out**. Rework the post and send the **new version as usual**: the same command with `--only N` (and `--image N=...` if the picture is
+  new; without it the previous one stays) - the version stands **next** in the queue, right after the open post, and goes
+  out when it is reviewed:
 
   ```
-  python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" drafts <тот же drafts.md> --only N [--image N=<путь>]
+  python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" drafts <the same drafts.md> --only N [--image N=<path>]
   ```
 
-  Новая версия уходит новым сообщением с кнопками (ref «… (v2)»), старая версия больше ничего не закрывает; ❤️ / 👎
-  под старым сообщением, пока новой версии нет, закрывает пост как обычно. Версию поста, на который не отвечали,
-  команда заменяет на месте (открытый — уходит заново).
-  Картинка сравнивается по содержимому: тот же путь с перезаписанным файлом — новая версия. Тот же текст и та же
-  картинка — не дубль: команда ответит «без изменений — … уже открыт или в очереди», второй раз не отправит.
-- Ничего из этого не требует ответа владельцу в чат: решает он кнопкой.
+  The new version goes as a new message with buttons (ref "... (v2)"), the old version no longer closes anything; ❤️ / 👎
+  under the old message, while there is no new version, closes the post as usual. The version of a post that was not
+  replied to is replaced in place by the command (an open one goes out again).
+  The picture is compared by content: the same path with an overwritten file is a new version. The same text and the same
+  picture is not a duplicate: the command answers "no changes - ... already open or in the queue" and does not send it a
+  second time.
+- None of this requires an answer to the owner in the chat: they decide with a button.
 
-## Колода с кнопками ❤️ 👎
+## A deck with ❤️ 👎 buttons
 
 ```
 python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" deck [--count 10]
 ```
 
-Берёт неоценённые карточки сервера колоды (`GET <колода>/api/deck`; адрес — `deck` у плагина в hub.json, по умолчанию
-`http://localhost:7777`) и кладёт в очередь; в Telegram они идут по одной. ❤️ / 👎 плагин сам отдаёт колоде
-(`/api/decide`) и сразу шлёт следующую; реплай словами тоже сам (`/api/direct`) — это докрутка: карточка уходит колоде, владельцу сразу следующая, а
-правленая вернётся первой в очереди, когда колода позовёт `deck --id <id>` (это делает сервер колоды, не ты).
-Тебе ничего делать не надо, хода на это не тратится. Карточка, уже стоящая в очереди, второй раз не встаёт.
+Takes the unrated cards of the deck server (`GET <deck>/api/deck`; the address is the plugin's `deck` in hub.json, by
+default `http://localhost:7777`) and puts them into the queue; they go to Telegram one at a time. The plugin passes ❤️ / 👎
+to the deck itself (`/api/decide`) and sends the next one at once; a reply in words too (`/api/direct`) - that is a
+revision: the card goes to the deck, the next one goes to the owner at once, and the edited card comes back first in the
+queue when the deck calls `deck --id <id>` (the deck server does that, not you). You have nothing to do, no turn is spent
+on it. A card already standing in the queue does not stand a second time.
 
-## Очередь
+## The queue
 
 ```
-python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" status   # что открыто и сколько ждёт
-python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" clear    # сбросить очередь и открытый пост (только по слову владельца)
-python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" again    # напомнить: открытый пост — в Telegram ещё раз, новым сообщением внизу (ref <ref> — если нужен конкретный)
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" status   # what is open and how many wait
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" clear    # reset the queue and the open post (only on the owner's word)
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/tg-posts" again    # remind: the open post - to Telegram once more, as a new message at the bottom (ref <ref> - if a specific one is needed)
 ```
 
-Очередь и посты в докрутке живут в плагине и переживают перезапуск хаба. Открытый пост долго без ответа — это владелец ещё не дошёл до него:
-не сбрасывай. Напомнил о нём владельцу (сводкой) — следом `again`: пост придёт снова с кнопками, очередь и версия те же.
+The queue and the posts in revision live in the plugin and survive a hub restart. An open post without an answer for a
+long time means the owner has not got to it yet: do not reset it. You reminded the owner about it (with a digest) - follow
+with `again`: the post comes again with buttons, the queue and the version are the same.

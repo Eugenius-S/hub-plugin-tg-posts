@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""Посты владельцу в Telegram: команды кладут посты в очередь плагина, а он держит в Telegram ровно один неразобранный
-пост — следующий уходит, когда этот закрыт кнопкой ❤️ или 👎 или когда на него ответили реплаем (докрутка).
+"""Posts to the owner in Telegram: the commands put posts into the plugin's queue, and it keeps exactly one unreviewed
+post in Telegram - the next one goes out when this one is closed with the ❤️ or 👎 button or when it got a reply
+(revision).
 
-    tg-posts drafts <файл.md> [--only 3,5] [--image N=<путь> …]   варианты постов из «## N. Название» в очередь; реплай
-                                                                   владельца на пост (докрутка) придёт этой сессии, следующий
-                                                                   пост уходит сразу; новая версия — та же команда с --only N
-                                                                   — встанет в очереди первой, за открытым
-    tg-posts deck [--count 10] [--url <адрес колоды>]             карточки колоды в очередь; ❤️ 👎 и реплаи плагин
-                                                                   сам отдаёт серверу колоды, без хода сессии
-    tg-posts deck --id <id> [<id> …]                              докрученные колодой карточки (её сервер зовёт сам) —
-                                                                   в очереди первыми, сразу за открытой
-    tg-posts status                                               что открыто, сколько в очереди и в докрутке
-    tg-posts clear                                                сбросить очередь и открытый пост
-    tg-posts again [<ref>]                                        открытый пост — в Telegram ещё раз, новым сообщением внизу (напомнить о нём); тот же пост, очередь не двигается
-    tg-posts close <ref>                                          закрыть пост без оценки колоде (её уже поставили в колоде); открытый — следующий уходит сразу
-Только stdlib: сессия зовёт его как есть, без кода хаба на пути."""
+    tg-posts drafts <file.md> [--only 3,5] [--image N=<path> ...]   draft posts from "## N. Title" into the queue; the owner's
+                                                                    reply to a post (revision) comes to this session, the next
+                                                                    post goes out at once; a new version - the same command
+                                                                    with --only N - stands first in the queue, after the open one
+    tg-posts deck [--count 10] [--url <deck address>]               deck cards into the queue; the plugin passes ❤️ 👎 and
+                                                                    replies to the deck server itself, without a session turn
+    tg-posts deck --id <id> [<id> ...]                              cards revised by the deck (its server calls this itself) -
+                                                                    first in the queue, right after the open one
+    tg-posts status                                                 what is open, how many are in the queue and in revision
+    tg-posts clear                                                  reset the queue and the open post
+    tg-posts again [<ref>]                                          the open post - to Telegram once more, as a new message at the bottom (to remind about it); the same post, the queue does not move
+    tg-posts close <ref>                                            close a post without a rating to the deck (it is already rated in the deck); the open one - the next goes out at once
+Stdlib only: a session calls it as is, without hub code on the path."""
 import argparse
 import hashlib
 import json
@@ -26,7 +27,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-EXT = "tg-posts"   # имя расширения в факте: по нему процесс плагина узнаёт свои нажатия и реплаи
+EXT = "tg-posts"   # the extension name in the fact: the plugin process recognizes its presses and replies by it
 _last = 0
 
 
@@ -35,7 +36,7 @@ def inbox(state):
 
 
 def put(state, cmd):
-    """Команда плагину в его ящик (атомарно, порядок — по имени): посты и сброс очереди."""
+    """A command to the plugin in its inbox (atomic, order by name): posts and queue reset."""
     global _last
     d = inbox(state)
     os.makedirs(d, exist_ok=True)
@@ -50,11 +51,11 @@ def put(state, cmd):
 def enqueue(state, items):
     put(state, {"op": "post", "items": items})
     return "" if os.path.isfile(os.path.join(state, EXT, "state.json")) else \
-        " (состояния плагина нет — процесс плагина не запущен? без него посты не уйдут)"
+        " (no plugin state - is the plugin process not running? posts will not go out without it)"
 
 
 def fingerprint(path):
-    """Отпечаток картинки: тот же путь с другим содержимым — другая версия поста."""
+    """Fingerprint of a picture: the same path with other content is another version of the post."""
     try:
         with open(path, "rb") as f:
             return hashlib.sha256(f.read()).hexdigest()[:16]
@@ -63,14 +64,14 @@ def fingerprint(path):
 
 
 def verdicts(state, items):
-    """['new' | 'same' | 'revised'] по каждому посту — как решит плагин (его enqueue), по его state.json, только чтение.
-    Разобрано плагином не всё, что лежит в ящике: ответ «по состоянию на сейчас»; ставим в очередь всё равно."""
+    """['new' | 'same' | 'revised'] for each post - as the plugin will decide (its enqueue), from its state.json, read only.
+    The plugin has not parsed everything that lies in the inbox: the answer is "as of now"; we enqueue anyway."""
     try:
         with open(os.path.join(state, EXT, "state.json"), encoding="utf-8") as f:
             st = json.load(f)
     except (OSError, ValueError):
         return ["new"] * len(items)
-    have = {k: p for k, p in (st.get("revising") or {}).items() if isinstance(p, dict)}   # докручиваемые — их новая версия тоже «та же»
+    have = {k: p for k, p in (st.get("revising") or {}).items() if isinstance(p, dict)}   # those in revision - their new version is also "the same"
     have.update({p["key"]: p for p in (st.get("posts") or []) if isinstance(p, dict) and "key" in p})
     o = st.get("open")
     if isinstance(o, dict) and "key" in o:
@@ -80,9 +81,9 @@ def verdicts(state, items):
         old = have.get(it["key"])
         if old is None:
             shown = it.get("ref") in (st.get("seen") or {}) or (st.get("sent") or {}).get(it.get("ref"), {}).get("kind") == "deck"
-            out.append("same" if it["kind"] == "deck" and not it.get("fresh") and shown else "new")   # показанную карточку плагин не шлёт второй раз
+            out.append("same" if it["kind"] == "deck" and not it.get("fresh") and shown else "new")   # the plugin does not send a shown card a second time
         elif it["kind"] == "deck":
-            out.append("revised" if it.get("fresh") and old is not o else "same")   # открытую не трогает; ждущая и докручиваемая возвращаются первыми
+            out.append("revised" if it.get("fresh") and old is not o else "same")   # it does not touch the open one; a waiting one and one in revision come back first
         else:
             path, img = (it.get("path"), it.get("img")) if it.get("path") else (old.get("path"), old.get("img"))
             same = it["text"] == old.get("text") and path == old.get("path") and img == old.get("img")
@@ -91,7 +92,7 @@ def verdicts(state, items):
 
 
 def drafts(text):
-    """[(N, название, тело)] из «## N. Название» — тело до следующего «## » без хвостовых «---»."""
+    """[(N, title, body)] from "## N. Title" - the body up to the next "## " without trailing "---"."""
     out = []
     parts = re.split(r"^##[ \t]+(\d+)[.)][ \t]*(.*)$", text, flags=re.M)
     for i in range(1, len(parts) - 2, 3):
@@ -105,10 +106,10 @@ def images(pairs):
     for p in pairs or []:
         n, sep, path = p.partition("=")
         if not sep or not n.strip().isdigit():
-            sys.exit(f"--image ждёт N=<путь>, а не «{p}»")
+            sys.exit(f"--image expects N=<path>, not \"{p}\"")
         path = os.path.abspath(os.path.expanduser(path.strip()))
         if not os.path.isfile(path):
-            sys.exit(f"нет файла {path}")
+            sys.exit(f"no such file: {path}")
         got[int(n)] = path
     return got
 
@@ -121,7 +122,7 @@ def cmd_drafts(a, state):
     pics = images(a.image)
     session = a.session or os.environ.get("HUB_SESSION")
     if not session:
-        sys.exit("нужна сессия: --session <имя> (в сессии хаба — сама)")
+        sys.exit("a session is required: --session <name> (inside a hub session it is set by itself)")
     items = []
     for n, title, body in posts:
         if only and n not in only:
@@ -136,14 +137,15 @@ def cmd_drafts(a, state):
     same = [it["n"] for it, v in zip(items, verdict) if v == "same"]
     name = os.path.basename(path)
     if items and len(same) == len(items):
-        print(f"без изменений — {'пост' if len(same) == 1 else 'посты'} {', '.join(map(str, same))} из {name} уже открыт или "
-              f"в очереди с тем же текстом и картинкой, второй раз не отправлю. Новая версия — другой текст или другая "
-              f"картинка (файл с новым содержимым подойдёт){warn}")
+        print(f"no changes - {'post' if len(same) == 1 else 'posts'} {', '.join(map(str, same))} from {name} "
+              f"{'is' if len(same) == 1 else 'are'} already open or in the queue with the same text and picture, "
+              f"I will not send {'it' if len(same) == 1 else 'them'} a second time. A new version is another text or "
+              f"another picture (a file with new content will do){warn}")
         return
-    note = f"; без изменений (уже есть): {', '.join(map(str, same))}" if same else ""
-    print(f"в очередь: {len(items) - len(same)} пост(ов) из {name}{note}{warn}; в Telegram идёт по одному — следующий после "
-          "❤️ или 👎. Реплай владельца (докрутка) придёт сюда с пометкой поста; после реплая следующий пост уже ушёл — "
-          "пришли новую версию той же командой с --only N: она встанет в очереди следующей")
+    note = f"; no changes (already there): {', '.join(map(str, same))}" if same else ""
+    print(f"queued: {len(items) - len(same)} post(s) from {name}{note}{warn}; they go to Telegram one at a time - the next one after "
+          "❤️ or 👎. The owner's reply (revision) comes here with a note about the post; after a reply the next post has already gone out - "
+          "send a new version with the same command and --only N: it will stand next in the queue")
 
 
 def deck_url(a, state):
@@ -162,7 +164,7 @@ def deck_url(a, state):
 
 
 def fetch(url):
-    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=10) as r:   # колода — localhost
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=10) as r:   # the deck is localhost
         return json.load(r)
 
 
@@ -174,11 +176,11 @@ def card_post(c, pic=None):
     return data
 
 
-VIDEO_MAX = 50 * 1024 * 1024   # предел загрузки Bot API: больше — в Telegram пойдёт картинка
+VIDEO_MAX = 50 * 1024 * 1024   # the Bot API upload limit: larger - a picture goes to Telegram
 
 
 def download(url, name, state, fresh, limit=None):
-    """Файл карточки с сервера колоды в папку плагина (бот грузит файл с диска); None — не вышло или больше limit."""
+    """A card file from the deck server into the plugin folder (the bot uploads the file from disk); None - failed or larger than limit."""
     path = os.path.join(state, EXT, "media", re.sub(r"[^\w.-]", "_", os.path.basename(name)))
     if os.path.isfile(path) and not fresh:
         return path
@@ -188,10 +190,10 @@ def download(url, name, state, fresh, limit=None):
                 f"{url}/media/{urllib.parse.quote(name)}", timeout=60 if limit else 20) as r:
             raw = r.read(limit + 1 if limit else -1)
     except OSError as e:
-        print(f"{name}: не скачалось ({e})", file=sys.stderr)
+        print(f"{name}: download failed ({e})", file=sys.stderr)
         return None
     if limit and len(raw) > limit:
-        print(f"{name}: больше {limit} байт — пойдёт картинкой", file=sys.stderr)
+        print(f"{name}: larger than {limit} bytes - will go as a picture", file=sys.stderr)
         return None
     with open(path + ".tmp", "wb") as f:
         f.write(raw)
@@ -200,8 +202,8 @@ def download(url, name, state, fresh, limit=None):
 
 
 def thumb(url, c, state, fresh=False):
-    """Файл карточки для Telegram: видео (local_video — имя файла на сервере колоды), иначе превью; не вышло — пост без
-    картинки. fresh — карточка докручена: файл мог смениться под тем же именем, кэш не берём."""
+    """A card file for Telegram: a video (local_video - the file name on the deck server), otherwise the preview; failed - a post
+    without a picture. fresh - the card was revised: the file may have changed under the same name, the cache is not used."""
     if c.get("local_video"):
         got = download(url, c["local_video"], state, fresh, VIDEO_MAX)
         if got:
@@ -214,22 +216,22 @@ def cmd_deck(a, state):
     try:
         got = fetch(url + "/api/deck")
     except (OSError, ValueError) as e:
-        sys.exit(f"колода {url} не отвечает: {e}")
-    cards = (got.get("cards") if isinstance(got, dict) else got) or []   # там только неоценённые
-    if a.id:   # докрученные колодой: эти карточки, не первые N; в очереди — первыми за открытой
+        sys.exit(f"the deck {url} does not answer: {e}")
+    cards = (got.get("cards") if isinstance(got, dict) else got) or []   # it holds unrated ones only
+    if a.id:   # revised by the deck: these cards, not the first N; in the queue - first after the open one
         by_id = {c["id"]: c for c in cards if c.get("id")}
         todo = [by_id[i] for i in dict.fromkeys(a.id) if i in by_id]
         missing = [i for i in dict.fromkeys(a.id) if i not in by_id]
         if not todo:
-            sys.exit(f"в колоде {url} нет неоценённых карточек: {', '.join(missing)}")
+            sys.exit(f"the deck {url} has no unrated cards: {', '.join(missing)}")
         warn = enqueue(state, [{**card_post(c, thumb(url, c, state, fresh=True)), "fresh": True} for c in todo])
-        print(f"в очередь первыми: {len(todo)} карточек колоды {url}"
-              + (f"; нет среди неоценённых: {', '.join(missing)}" if missing else "") + warn)
+        print(f"queued first: {len(todo)} cards of the deck {url}"
+              + (f"; not among the unrated: {', '.join(missing)}" if missing else "") + warn)
         return
     todo = [c for c in cards if c.get("id")][: a.count]
     warn = enqueue(state, [card_post(c, thumb(url, c, state)) for c in todo])
-    print(f"в очередь: {len(todo)} из {len(cards)} карточек колоды {url}{warn}; в Telegram идёт по одному — следующая после "
-          "❤️ или 👎, их и реплаи плагин отдаст колоде сам")
+    print(f"queued: {len(todo)} of {len(cards)} cards of the deck {url}{warn}; they go to Telegram one at a time - the next one after "
+          "❤️ or 👎, the plugin passes those and the replies to the deck itself")
 
 
 def cmd_status(a, state):
@@ -237,45 +239,45 @@ def cmd_status(a, state):
         with open(os.path.join(state, EXT, "state.json"), encoding="utf-8") as f:
             st = json.load(f)
     except (OSError, ValueError):
-        sys.exit("состояния плагина нет: процесс плагина не запущен или ещё ничего не получал")
+        sys.exit("no plugin state: the plugin process is not running or has not received anything yet")
     o, posts = st.get("open"), st.get("posts") or []
     new = sum(n.endswith(".json") for n in os.listdir(inbox(state))) if os.path.isdir(inbox(state)) else 0
-    print("открыт в Telegram: " + (f"{o['ref']} (с {time.strftime('%d.%m %H:%M', time.localtime(o['at']))})" if o else "ничего"))
-    print(f"в очереди: {len(posts)}" + "".join(f"\n  {p['ref']}" for p in posts[:10]) + ("\n  …" if len(posts) > 10 else ""))
+    print("open in Telegram: " + (f"{o['ref']} (since {time.strftime('%d.%m %H:%M', time.localtime(o['at']))})" if o else "nothing"))
+    print(f"in the queue: {len(posts)}" + "".join(f"\n  {p['ref']}" for p in posts[:10]) + ("\n  …" if len(posts) > 10 else ""))
     if new:
-        print(f"ещё не разобрано плагином: {new} команд(ы)")
+        print(f"not yet parsed by the plugin: {new} command(s)")
     rev = st.get("revising") or {}
     if rev:
-        print(f"в докрутке: {len(rev)}" + "".join(f"\n  {p['ref']}" for p in list(rev.values())[:10]))
+        print(f"in revision: {len(rev)}" + "".join(f"\n  {p['ref']}" for p in list(rev.values())[:10]))
     if st.get("jobs"):
-        print(f"оценок ждёт колоду: {len(st['jobs'])}")
+        print(f"ratings waiting for the deck: {len(st['jobs'])}")
 
 
 def cmd_close(a, state):
     put(state, {"op": "close", "ref": a.ref})
-    print(f"{a.ref}: закрыта в плагине без оценки колоде; если она была открыта — владельцу уходит следующая")
+    print(f"{a.ref}: closed in the plugin without a rating to the deck; if it was open - the next one goes to the owner")
 
 
 def cmd_again(a, state):
-    """Состояние плагина — только чтение (как status): нет открытого поста или ref не открыт — ничего не кладём в ящик."""
+    """The plugin state is read only (like status): no open post or the ref is not open - nothing goes into the inbox."""
     try:
         with open(os.path.join(state, EXT, "state.json"), encoding="utf-8") as f:
             o = json.load(f).get("open")
     except (OSError, ValueError):
-        sys.exit("состояния плагина нет: процесс плагина не запущен или ещё ничего не получал")
+        sys.exit("no plugin state: the plugin process is not running or has not received anything yet")
     if not isinstance(o, dict):
-        print("нет открытого поста — слать нечего")
+        print("no open post - nothing to send")
         return
     if a.ref and a.ref not in (o.get("ref"), o.get("key")):
-        print(f"{a.ref} не открыт (открыт: {o.get('ref')}) — слать нечего")
+        print(f"{a.ref} is not open (open: {o.get('ref')}) - nothing to send")
         return
     put(state, {"op": "again", "ref": o["ref"]})
-    print(f"{o['ref']}: отправляю ещё раз новым сообщением; это тот же пост — кнопки и реплаи на старом и новом сообщении относятся к нему, очередь не двигается")
+    print(f"{o['ref']}: sending it once more as a new message; it is the same post - buttons and replies on the old and the new message belong to it, the queue does not move")
 
 
 def cmd_clear(a, state):
     put(state, {"op": "clear"})
-    print("очередь и открытый пост сброшены (сообщения, уже висящие в Telegram, остаются)")
+    print("the queue and the open post are reset (messages already hanging in Telegram stay)")
 
 
 def main(argv=None):
@@ -299,7 +301,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     state = os.environ.get("HUB_STATE_DIR")
     if not state:
-        sys.exit("нужен HUB_STATE_DIR (в сессии хаба он есть)")
+        sys.exit("HUB_STATE_DIR is required (a hub session has it)")
     {"drafts": cmd_drafts, "deck": cmd_deck, "status": cmd_status, "clear": cmd_clear, "close": cmd_close, "again": cmd_again}[a.cmd](a, state)
 
 

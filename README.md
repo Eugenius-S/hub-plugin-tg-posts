@@ -1,35 +1,60 @@
-# tg-posts — посты в Telegram
+# tg-posts - posts in Telegram
 
-Плагин [Agents Hub](https://github.com/flagman/agents-hub-core): сессия шлёт владельцу посты в Telegram **по одному** —
-картинка с подписью. Команды кладут посты в очередь плагина; в Telegram висит один неразобранный пост, следующий уходит,
-когда этот закрыт кнопкой ❤️ или 👎 или владелец ответил на него реплаем (докрутка).
+An [Agents Hub](https://github.com/flagman/agents-hub-core) plugin: a session sends the owner posts in Telegram **one at
+a time** - a picture with a caption. The commands put posts into the plugin's queue; one unreviewed post hangs in
+Telegram, and the next one goes out when this one is closed with a ❤️ or 👎 button or when the owner replied to it
+(revision).
 
-- **Варианты постов.** Из файла черновиков (`## N. Название`). ❤️ — принят, 👎 — категорический слив: оба закрывают пост,
-  сессия получает сообщение с номером, названием, файлом и вердиктом. Реплай голосом или текстом — докрутка: он идёт
-  сессии, а владельцу сразу уходит следующий пост из очереди. После реплая следующий пост уже ушёл; новую версию
-  сессия шлёт как обычно (`drafts --only N`) — она встаёт в очереди первой, сразу за открытым, и уходит, когда он
-  разобран. ❤️ / 👎 под старым сообщением докрученного поста закрывает его как обычно. Версия поста, на который не
-  отвечали, заменяет его на месте (открытый — уходит заново).
-- **Колода.** Карточки с кнопками ❤️ 👎 — тоже по одной. Нажатие и реплай словами плагин сам отдаёт серверу колоды
-  (`/api/decide`, `/api/direct` с `from: "tg-posts"`) — без хода сессии. Реплай на карточку — докрутка, как у вариантов
-  постов: владельцу сразу уходит следующая, колода правит карточку в фоне и по готовности зовёт `tg-posts deck --id <id>` —
-  новая версия встаёт в очереди первой, сразу за открытой (и когда реплай был на неоткрытую карточку, и когда она уже ждала в очереди). Цитата, выделенная в реплае (`quote`, с бота этого хаба), уходит колоде вместе с текстом. ❤️ / 👎 под карточкой в докрутке закрывает её. Адрес — в `hub.json`:
-  `"extensions": {"<имя плагина>": {…, "deck": "http://localhost:7777"}}`.
-  Номер в батче: в момент отправки плагин спрашивает у колоды `GET /api/badge?id=<ref>` (без прокси, 3 с) и ставит `text` («7 из 21») первой строкой над подписью; колода молчит или без `text` — карточка уходит как раньше.
-- **Почему 👎.** После 👎 владельцу сразу уходит короткий вопрос «Почему 👎?» с кнопками причин (колода: Баян, Не наш голос,
-  Не дизайн, Слабый кадр, Мыльно, Дубль; варианты постов: Скучно, Не по теме, Слабая картинка, Длинно, Не наш тон) — или реплаем
-  своими словами. Следующий пост не ждёт ответа. Причина уходит колоде вместе с оценкой (`/api/decide` с `reason`; слова —
-  `/api/comment`) или сессии постов сообщением. После ответа вопрос заменяется строкой «Почему: …»; без ответа остаётся, а
-  отказ колоде уходит через 20 минут без причины. Замена вопроса строкой работает с ботом, знающим `settle`.
-- **Видео.** У карточки колоды есть поле `local_video` (имя файла, сервер отдаёт его по `/media/<имя>`) — в Telegram она идёт
-  видео с подписью и кнопками вместо превью. Видео больше 50 МБ или не скачалось — уходит превью.
-- **Очередь.** Лежит в состоянии плагина и переживает перезапуск. `tg-posts status` — что открыто, сколько ждёт и что в докрутке,
-  `tg-posts clear` — сбросить очередь и открытый пост, `tg-posts again [<ref>]` — открытый пост ещё раз в Telegram новым сообщением внизу (напомнить о нём вслед за сводкой: тот же пост, ref и очередь не меняются, номер «N из M» свежий; кнопки и реплаи на старом и новом сообщении — одного поста; нет открытого или ref не открыт — ничего не шлёт и говорит об этом), `tg-posts close <ref>` — закрыть один пост без оценки колоде
-  (её уже поставили в колоде или на странице): открытый — владельцу сразу уходит следующий.
+- **Draft posts.** From a drafts file (`## N. Title`). ❤️ - approved, 👎 - rejected outright: both close the post, and
+  the session gets a message with the number, the title, the file and the verdict. A reply by voice or text is a
+  revision: it goes to the session, and the owner immediately gets the next post from the queue. After a reply the next
+  post has already gone out; the session sends the new version as usual (`drafts --only N`) - it stands first in the
+  queue, right after the open one, and goes out when that one is reviewed. ❤️ / 👎 under the old message of a revised post
+  closes it as usual. A version of a post that was not replied to replaces it in place (an open one goes out again).
+- **Deck.** Cards with ❤️ 👎 buttons - also one at a time. The plugin passes a press and a reply in words to the deck
+  server itself (`/api/decide`, `/api/direct` with `from: "tg-posts"`) - without a session turn. A reply to a card is a
+  revision, like with draft posts: the owner immediately gets the next one, the deck edits the card in the background and
+  when ready calls `tg-posts deck --id <id>` - the new version stands first in the queue, right after the open one (both
+  when the reply was to an unopened card and when it was already waiting in the queue). A quote selected in the reply
+  (`quote`, from this hub's bot) goes to the deck together with the text. ❤️ / 👎 under a card in revision closes it.
+  The address is in `hub.json`: `"extensions": {"<plugin name>": {..., "deck": "http://localhost:7777"}}`.
+  The number in the batch: at the moment of sending the plugin asks the deck `GET /api/badge?id=<ref>` (no proxy, 3 s)
+  and puts its `text` ("7 of 21") as the first line above the caption; the deck is silent or has no `text` - the card
+  goes out as before.
+- **Why 👎.** After 👎 the owner immediately gets a short question "Why 👎?" with reason buttons (deck: Stale, Not our
+  voice, Not design, Weak visual, Blurry, Dupe; draft posts: Boring, Off-topic, Weak image, Too long, Not our tone) - or
+  a reply in their own words. The next post does not wait for the answer. The reason goes to the deck together with the
+  rating (`/api/decide` with `reason`; words - `/api/comment`) or to the posts session as a message. After the answer
+  the question is replaced with a "Why: ..." line; unanswered it stays, and the deck rejection goes out after 20 minutes
+  without a reason. Replacing the question with a line works with a bot that knows `settle`.
+- **Video.** A deck card has a `local_video` field (a file name, the server serves it at `/media/<name>`) - in Telegram
+  it goes as a video with a caption and buttons instead of the preview. A video over 50 MB or one that failed to
+  download - the preview goes.
+- **Queue.** Lives in the plugin's state and survives a restart. `tg-posts status` - what is open, how many wait and what
+  is in revision, `tg-posts clear` - reset the queue and the open post, `tg-posts again [<ref>]` - the open post once
+  more in Telegram as a new message at the bottom (to remind about it after a digest: the same post, the ref and the
+  queue do not change, the "N of M" number is fresh; buttons and replies on the old and the new message belong to one
+  post; no open post or the ref is not open - it sends nothing and says so), `tg-posts close <ref>` - close one post
+  without a rating to the deck (it is already rated in the deck or on the page): an open one - the owner immediately
+  gets the next one.
 
-Нужен хаб с фактом `telegram.post` (модуль Telegram отправляет пост, нажатие — `telegram.pressed`, реплай —
-`telegram.replied`; реплай на вариант постов плагин узнаёт по сообщению бота сессии с пометкой «(в ответ на пост …)»).
+Needs a hub with the `telegram.post` fact (the Telegram module sends a post, a press is `telegram.pressed`, a reply is
+`telegram.replied`; the plugin recognizes a reply to a draft post by the bot's message to the session with a note that it
+is a reply to a post - today the bot words that note in Russian).
 
-Сессии — скилл `tg-posts` (как отправить, как жить с очередью и докруткой).
+For sessions - the `tg-posts` skill (how to send, how to live with the queue and revision).
 
-Иконка — [3D Fluency](https://icons8.com/icons/3d-fluency) от Icons8.
+## Language
+
+The texts that go to the owner in Telegram (the "Why?" question and its buttons) are in two languages, English and
+Russian, and follow the hub language (`hub.json` `language`, then the owner's language, then English), resolved at the
+moment of sending. Any other language falls back to English. Messages to sessions and the CLI output are always
+English. The manifest description is English, the Russian text is under `i18n.ru` in `hub-plugin.json`.
+
+## Tests
+
+```
+PYTHONPATH=<hub code folder> HUB_STATE_DIR=<temp dir> HUB_CONFIG=<temp file> python3 -m unittest discover -s tests
+```
+
+Icon — [3D Fluency](https://icons8.com/icons/3d-fluency) by Icons8.
