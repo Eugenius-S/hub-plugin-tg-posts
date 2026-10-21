@@ -30,6 +30,9 @@ Telegram, and the next one goes out when this one is closed with a ❤️ or �
 - **Video.** A deck card has a `local_video` field (a file name, the server serves it at `/media/<name>`) - in Telegram
   it goes as a video with a caption and buttons instead of the preview. A video over 50 MB or one that failed to
   download - the preview goes.
+- **Stale cards.** Before a deck card goes out (the next one, or `again`), the plugin asks the deck for its unrated list: a card
+  that is gone from it (rated on the deck page while it waited) is dropped quietly and the next one is taken; the deck is
+  silent - nothing goes blind, the plugin tries again after 30 s.
 - **Queue.** Lives in the plugin's state and survives a restart. `tg-posts status` - what is open, how many wait and what
   is in revision, `tg-posts clear` - reset the queue and the open post, `tg-posts again [<ref>]` - the open post once
   more in Telegram as a new message at the bottom (to remind about it after a digest: the same post, the ref and the

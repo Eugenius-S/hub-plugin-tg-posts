@@ -25,6 +25,7 @@ NAME = os.environ.get("HUB_EXTENSION", EXT)
 LIKE, NOPE = "❤️", "👎"
 RETRY, GIVE_UP = 30, 3600   # s: retry while the deck is down, how long to keep trying
 KEEP_SENT, KEEP_REVS, KEEP_REVISING, KEEP_SEEN = 300, 500, 100, 3000   # how many sent posts, version counters, posts in revision and shown cards to remember
+DECK_WAIT = 5   # s: how long to wait for the list of unrated cards (/api/deck) before sending a card; the deck is silent - the card waits RETRY
 BADGE_WAIT, BADGE_MAX = 3, 40   # s: how long to wait for the card number from the deck; characters in the number line
 WHY_HOLD = 1200   # s: a deck card rejection waits this long for a reason, then goes out without one
 WHY_DECK = ["stale", "off-brand", "not-design", "weak-visual", "soft", "dupe", "boring", "changed-mind"]   # reasons of the deck web UI: reason codes in /api/decide, STR key suffixes
@@ -194,6 +195,8 @@ class Plugin:
         st.setdefault("why_n", 0)
         st.setdefault("seen", {})   # deck card ref -> when it went to the owner: a shown card does not go twice (except a new version after revision)
         st.setdefault("revs", {})   # post key -> how many times it went out (a new version is a new ref, a press under the old one does not count)
+        st.setdefault("again", False)   # a reminder about the open card is waiting for the deck to answer (tg-posts again)
+        self.deck_after = 0   # not persisted: no deck question before this time (the deck was silent)
 
     def size(self):
         try:
@@ -233,6 +236,19 @@ class Plugin:
         except (OSError, ValueError, AttributeError):
             return ""
         return " ".join(text.split())[:BADGE_MAX] if isinstance(text, str) else ""
+
+    def listed(self):
+        """Refs of the cards the deck still has unrated (/api/deck holds those only: a card rated on its page, or by a repeat, is
+        gone from it), or None - the deck does not answer or the answer is not a list of cards: do not guess then."""
+        try:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(deck_url(self.dir) + "/api/deck", timeout=DECK_WAIT) as r:
+                got = json.loads(r.read().decode("utf-8", "replace"))
+        except (OSError, ValueError):
+            return None
+        cards = got.get("cards") if isinstance(got, dict) else got
+        if not isinstance(cards, list):
+            return None
+        return {c["id"] for c in cards if isinstance(c, dict) and c.get("id")}
 
     def handle(self, events):
         changed = False
@@ -396,10 +412,27 @@ class Plugin:
             self.st["open"] = None
 
     def pump(self):
-        """One unreviewed post hangs in Telegram: nothing open - send the next one from the queue."""
-        if self.st["open"] is not None or not self.st["posts"]:
+        """One unreviewed post hangs in Telegram: nothing open - send the next one from the queue. A deck card goes only if the
+        deck still lists it as unrated (it may have been rated on the deck page while it waited - then it is dropped quietly,
+        the next one is taken); the deck is silent - nothing goes blind, the next attempt is after RETRY."""
+        if self.st["open"] is not None:
             return
-        item = self.st["posts"].pop(0)
+        have = None
+        while self.st["posts"]:
+            item = self.st["posts"][0]
+            if item["kind"] == "deck":
+                if have is None:
+                    have = self.listed()
+                    if have is None:
+                        self.deck_after = self.clock() + RETRY
+                        return
+                if item["ref"] not in have:
+                    self.st["posts"].pop(0)
+                    continue
+            break
+        else:
+            return
+        self.st["posts"].pop(0)
         rev = self.st["revs"][item["key"]] = self.st["revs"].get(item["key"], 0) + 1
         ref = item["ref"][:180] + (f" (v{rev})" if rev > 1 and item["kind"] == "drafts" else "")   # for the deck the ref is the card id
         self.emit_post(item, ref)
@@ -431,8 +464,28 @@ class Plugin:
         o = self.st["open"]
         if o is None or ref not in ("", o["ref"], o["key"]):
             return False
-        self.emit_post(o, o["ref"])
+        self.st["again"] = True
+        self.remind()
         return True
+
+    def remind(self):
+        """The reminder about the open card: a deck card is checked against the deck first - rated there already (on its page)
+        means closed quietly and the next one goes out instead; the deck is silent - not sent blind, retried after RETRY."""
+        o = self.st["open"]
+        if o is None:
+            self.st["again"] = False
+            return
+        if o["kind"] == "deck":
+            have = self.listed()
+            if have is None:
+                self.deck_after = self.clock() + RETRY
+                return
+            if o["ref"] not in have:
+                self.st["again"] = False
+                self.close_quiet(o["ref"])
+                return self.pump()
+        self.st["again"] = False
+        self.emit_post(o, o["ref"])
 
     def answer(self, ref, text):
         """`tg-posts reply`: an answer to the owner's question about a post - to Telegram as a reply to the post's latest
@@ -564,6 +617,12 @@ class Plugin:
 
     def poll(self):
         self.inbox()
+        if self.deck_after <= self.clock() and (self.st["again"] or self.st["open"] is None and self.st["posts"]):
+            if self.st["again"]:   # a reminder or a card waited for the deck: ask again
+                self.remind()
+            else:
+                self.pump()
+            self.save()
         ino = journal.identity(self.path)
         if ino != self.ino or self.size() < self.offset:   # the journal was started anew - read the new one from the start
             self.ino, self.offset = ino, 0

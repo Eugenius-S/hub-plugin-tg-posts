@@ -52,6 +52,7 @@ class Deck:
     """A fake deck server: /api/deck, /media/<file>, POST requests go to calls."""
     def __init__(self, cards):
         self.calls, self.down, self.badges, self.badge = [], False, [], None   # badge - the /api/badge answer (None - the deck does not know it)
+        self.cards, self.silent = cards, False   # cards - the unrated list /api/deck answers with; silent - /api/deck does not answer (503)
         me = self
 
         class H(BaseHTTPRequestHandler):
@@ -60,7 +61,9 @@ class Deck:
 
             def do_GET(self):
                 if self.path == "/api/deck":
-                    return self.reply(200, json.dumps({"cards": cards, "liked": 0}).encode())
+                    if me.silent:
+                        return self.reply(503, b"{}")
+                    return self.reply(200, json.dumps({"cards": me.cards, "liked": 0}).encode())
                 if self.path.startswith("/media/"):
                     if self.path.endswith(".mp4"):
                         return self.reply(200, b"\x00\x00\x00 ftypmp4video")
@@ -347,7 +350,13 @@ class Process(Base):
         self.assertEqual(len(self.deck.calls), 2)
 
     def queue(self, *items):
+        self.listed(*items)
         cli.put(self.dir, {"op": "post", "items": list(items)})
+
+    def listed(self, *items):
+        """The deck lists the queued cards as unrated (as it does for a card the CLI has just taken from it)."""
+        have = {c["id"] for c in self.deck.cards}
+        self.deck.cards += [{"id": i["ref"]} for i in items if i["kind"] == "deck" and i["ref"] not in have]
 
     @staticmethod
     def card(i, **kw):
@@ -417,11 +426,10 @@ class Process(Base):
             (x,) = self.posts()
             self.assertEqual(x["text"], f"card {ref}", answer)
             self.press(ref, "❤️")
-        self.deck.server.shutdown()   # the deck does not answer at all
+        self.deck.server.shutdown()   # the deck does not answer at all: the card is not sent blind (it waits for the deck)
         self.queue(self.card("z"))
         p.poll()
-        (z,) = self.posts()
-        self.assertEqual(z["text"], "card z")
+        self.assertEqual(self.posts(), [])
 
     def test_drafts_do_not_ask_the_deck_for_a_badge(self):
         p = self.plugin()
@@ -457,8 +465,9 @@ class Process(Base):
         self.assertEqual((self.deck.calls, self.posts(), p.st["revising"]), ([], [], {}))
 
     def deck_revised(self, *ids, text=None):
-        cli.put(self.dir, {"op": "post", "items": [{**self.card(i, **({"text": text} if text else {})), "fresh": True}
-                                                    for i in ids]})
+        items = [{**self.card(i, **({"text": text} if text else {})), "fresh": True} for i in ids]
+        self.listed(*items)
+        cli.put(self.dir, {"op": "post", "items": items})
 
     def test_revised_deck_card_goes_first_in_the_queue_but_not_over_the_open_one(self):
         p = self.plugin()
@@ -1367,6 +1376,107 @@ class Process(Base):
         self.assertEqual(self.again("a")[:10], "a: sending")   # by ref too, any number of times
         p.poll()
         self.assertEqual(len(self.posts()), 1)
+
+    def test_queued_card_already_rated_in_the_deck_is_dropped_quietly_and_the_next_one_goes_out(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.card("c"))
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["a"])
+        self.deck.cards = [c for c in self.deck.cards if c["id"] != "b"]   # b was liked on the deck page while it waited
+        self.press("a", "❤️")
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["c"])   # b is skipped: not sent, not rated again
+        self.assertEqual([(path, b["id"]) for path, b in self.deck.calls], [("/api/decide", "a")])
+        self.assertEqual([q["ref"] for q in p.st["posts"]], [])
+        self.assertEqual(p.st["open"]["ref"], "c")
+        self.assertNotIn("b", p.st["seen"])
+
+    def test_every_queued_card_rated_in_the_deck_leaves_nothing_open(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.card("c"))
+        p.poll()
+        self.taken()
+        self.deck.cards = []
+        self.press("a", "👎")
+        p.poll()
+        self.assertEqual((self.posts(), p.st["posts"], p.st["open"]), ([], [], None))
+
+    def test_silent_deck_holds_the_next_card_back_and_it_goes_after_the_pause(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.taken()
+        self.deck.silent = True
+        self.press("a", "❤️")
+        p.poll()
+        self.assertEqual((self.posts(), [q["ref"] for q in p.st["posts"]], p.st["open"]), ([], ["b"], None))   # not blind: b waits
+        self.deck.silent = False
+        p.poll()
+        self.assertEqual(self.posts(), [])   # the pause before the next attempt
+        self.now += main.RETRY
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["b"])
+        self.now += main.RETRY
+        p.poll()
+        self.assertEqual(self.posts(), [])   # once
+
+    def test_drafts_do_not_wait_for_the_deck(self):
+        p = self.plugin()
+        self.queue(self.draft(1), self.draft(2))
+        p.poll()
+        self.taken()
+        self.deck.silent = True
+        self.press("d.md #1 Post", "❤️")
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["d.md #2 Post"])
+
+    def test_again_of_a_card_rated_in_the_deck_closes_it_quietly_and_sends_the_next(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.taken()
+        self.deck.cards = [c for c in self.deck.cards if c["id"] != "a"]   # liked on the page: the open card is already rated
+        self.again()
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["b"])   # not a reminder about a, but the next card
+        self.assertEqual((p.st["open"]["ref"], self.deck.calls), ("b", []))
+
+    def test_again_with_a_silent_deck_is_not_sent_blind_but_waits_for_it(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.taken()
+        self.deck.silent = True
+        self.again()
+        p.poll()
+        self.assertEqual((self.posts(), p.st["open"]["ref"]), ([], "a"))
+        self.deck.silent = False
+        self.now += main.RETRY
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["a"])   # the reminder still goes, once
+        self.now += main.RETRY
+        p.poll()
+        self.assertEqual(self.posts(), [])
+
+    def test_again_of_a_draft_does_not_ask_the_deck(self):
+        p = self.plugin()
+        self.queue(self.draft(1))
+        p.poll()
+        self.taken()
+        self.deck.silent = True
+        self.again()
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["d.md #1 Post"])
+
+    def test_again_of_a_card_rated_in_the_deck_with_nothing_queued_just_closes_it(self):
+        p = self.plugin()
+        self.queue(self.card("a"))
+        p.poll()
+        self.taken()
+        self.deck.cards = []
+        self.again()
+        p.poll()
+        self.assertEqual((self.posts(), p.st["open"]), ([], None))
 
     def test_again_keeps_picture_video_and_session_of_a_draft_and_its_versioned_ref(self):
         p = self.plugin()
