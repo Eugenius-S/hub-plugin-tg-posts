@@ -401,6 +401,19 @@ class Process(Base):
         self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "like"}),
                                            ("/api/decide", {"id": "b", "verdict": "reject"})])
 
+    def test_session_post_goes_before_waiting_deck_cards_but_not_over_the_open_one(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.card("c"))
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["a"])
+        self.queue(self.draft(1), self.draft(2))   # a news post from a session while deck cards wait
+        p.poll()
+        self.assertEqual(self.posts(), [])   # a is still open
+        for ref, want in (("a", "d.md #1 Post"), ("d.md #1 Post", "d.md #2 Post"), ("d.md #2 Post", "b")):
+            self.press(ref, "❤️")
+            p.poll()
+            self.assertEqual([x["ref"] for x in self.posts()], [want])
+
     def test_deck_card_gets_the_batch_number_as_its_first_line(self):
         p = self.plugin()
         self.deck.badge = {"text": "7 of 21"}

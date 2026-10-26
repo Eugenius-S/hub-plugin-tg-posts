@@ -537,7 +537,11 @@ class Plugin:
             if item["kind"] == "deck" and fresh:   # edited by the deck but not in revision (the reply was to an unopened card, a restart): first, not at the tail
                 st["posts"].insert(0, item)
                 return "revised"
-            st["posts"].append(item)
+            if item["kind"] == "deck":
+                st["posts"].append(item)
+            else:   # a session's post (news) does not wait behind the deck's batch: after the other session posts, before the cards
+                at = next((i for i, x in enumerate(st["posts"]) if x["kind"] == "deck"), len(st["posts"]))
+                st["posts"].insert(at, item)
             return "new"
         if item["kind"] == "deck":
             if fresh and old is o and any(old.get(k) != item.get(k) for k in ("text", "path", "img")):
