@@ -10,6 +10,7 @@ closing a draft is a message to the session. Posts and commands are put into the
 Texts that go to the owner in Telegram (the "Why?" question and its buttons) are in the hub language
 (core.i18n.current(): hub.json language -> owner language -> en), resolved at the moment of sending; any language
 without a table here falls back to English. Messages to sessions are always English."""
+import datetime
 import json
 import os
 import sys
@@ -19,6 +20,20 @@ import urllib.parse
 import urllib.request
 
 from core import catalog, journal, spool
+
+try:   # the owner's quiet window follows the core (core/owner.py); no core module - the same hours of our own
+    from core.owner import WEEKEND_FROM as QUIET_FROM, WEEKEND_TO as QUIET_TO
+except ImportError:
+    QUIET_FROM, QUIET_TO = (20, 0), (8, 30)
+try:
+    from core.zones import zone
+except ImportError:
+    def zone(name):
+        try:
+            import zoneinfo
+            return zoneinfo.ZoneInfo(name or "UTC")
+        except Exception:   # noqa: BLE001 - no tz database: UTC
+            return datetime.timezone.utc
 
 EXT = "tg-posts"   # the CLI (bin/tg-posts) signs its facts with this name - the bot passes presses back here by it
 NAME = os.environ.get("HUB_EXTENSION", EXT)
@@ -32,6 +47,8 @@ WHY_DECK = ["stale", "off-brand", "not-design", "weak-visual", "soft", "dupe", "
 WHY_DRAFTS = ["bored", "off-topic", "weak-image", "long", "off-tone"]   # reasons for a draft post: STR key suffixes
 KEEP_WHY = 200
 SLOT_DECK, SLOT_DRAFTS = "open", "open_drafts"   # st keys of the two places in Telegram: a deck card, a session's post
+DIGEST_AT = (12, 0)   # the weekend digest hour (extensions.tg-posts.weekend_digest_at "HH:MM")
+SETTINGS_EVERY = 5   # s: hub.json is read no more often than this
 HEAD_MAX = 200   # the post caption's first line above an answer (tg-posts reply)
 
 
@@ -148,6 +165,16 @@ def deck_url(state):
     return "http://localhost:7777"
 
 
+def hhmm(raw, default):
+    """"12:00" -> (12, 0); anything else - default."""
+    try:
+        h, m = str(raw).split(":")
+        h, m = int(h), int(m)
+        return (h, m) if 0 <= h < 24 and 0 <= m < 60 else default
+    except ValueError:
+        return default
+
+
 def slot_of(kind):
     """st key of the place in Telegram for a post kind."""
     return SLOT_DECK if kind == "deck" else SLOT_DRAFTS
@@ -174,6 +201,7 @@ class Plugin:
         self.dir, self.path = state_dir, os.path.join(state_dir, "journal.jsonl")
         self.mine = os.path.join(state_dir, EXT, "state.json")
         self.post, self.clock = post or self.http, clock
+        self._cfg = (0, None)
         try:
             with open(self.mine, encoding="utf-8") as f:
                 self.st = json.load(f)
@@ -208,8 +236,55 @@ class Plugin:
         st.setdefault("why_n", 0)
         st.setdefault("seen", {})   # deck card ref -> when it went to the owner: a shown card does not go twice (except a new version after revision)
         st.setdefault("revs", {})   # post key -> how many times it went out (a new version is a new ref, a press under the old one does not count)
+        for p in st["posts"]:
+            p.setdefault("at", self.clock())   # when it was queued: a weekend post goes with the digest after this moment
         st.setdefault("again", False)   # a reminder about the open card is waiting for the deck to answer (tg-posts again)
         self.deck_after = 0   # not persisted: no deck question before this time (the deck was silent)
+
+    def quiet_cfg(self):
+        """The owner's quiet time for session posts (hub.json, read at most every SETTINGS_EVERY s): {on, digest, tz}.
+        extensions.tg-posts.quiet (default on) and weekend_digest_at (default 12:00); the zone is hub.json timezone."""
+        now = self.clock()
+        if now - self._cfg[0] >= SETTINGS_EVERY or not self._cfg[1]:
+            try:
+                cfg = catalog.load_config(self.dir)
+                ext = cfg.get("extensions") or {}
+                mine = {}
+                for k in (EXT, NAME):   # the installed name wins over the short one
+                    if isinstance(ext.get(k), dict):
+                        mine.update(ext[k])
+                got = {"on": mine.get("quiet") is not False, "digest": hhmm(mine.get("weekend_digest_at"), DIGEST_AT),
+                       "tz": str(cfg.get("timezone") or "UTC")}
+            except Exception:   # noqa: BLE001 - hub.json is unreadable: the defaults, a post must not get stuck
+                got = {"on": True, "digest": DIGEST_AT, "tz": "UTC"}
+            self._cfg = (now, got)
+        return self._cfg[1]
+
+    def gate(self, item, reminder=False):
+        """May this session post go to the owner now -> None (hold), or (sound, slot): sound False - a silent message,
+        slot - the weekend digest it belongs to (None on a weekday).
+        Every day QUIET_FROM-QUIET_TO nothing goes (the owner's quiet time). On Saturday and Sunday the posts gather and go
+        once a day at the digest hour: the first one with a sound, the others (the owner closes one - the next comes)
+        silent. A post that came after today's digest waits for the next one (Sunday after the digest - for Monday
+        QUIET_TO). A revision (the owner replied to the post) is an answer to the owner, not news: no digest wait,
+        only the quiet time. A reminder about an open post: waits out the quiet time, on weekends goes without a sound."""
+        c = self.quiet_cfg()
+        if not c["on"]:
+            return True, None
+        now = self.clock()
+        t = datetime.datetime.fromtimestamp(now, zone(c["tz"]))
+        if (t.hour, t.minute) >= QUIET_FROM or (t.hour, t.minute) < QUIET_TO:
+            return None
+        if t.weekday() not in (5, 6):
+            return True, None
+        if reminder:
+            return False, None
+        if item.get("answer"):
+            return True, None
+        d = t.replace(hour=c["digest"][0], minute=c["digest"][1], second=0, microsecond=0).timestamp()
+        if now < d or (item.get("at") or now) > d:
+            return None
+        return self.st.get("digest") != d, d
 
     def size(self):
         try:
@@ -442,20 +517,25 @@ class Plugin:
     def pump_kind(self, kind):
         """The place of this kind is free - send the next post of the kind from the queue. A deck card goes only if the
         deck still lists it as unrated (it may have been rated on the deck page while it waited - then it is dropped quietly,
-        the next one is taken); the deck is silent - nothing goes blind, the next attempt is after RETRY."""
+        the next one is taken); the deck is silent - nothing goes blind, the next attempt is after RETRY. A session's post
+        goes when the owner's quiet time allows (gate): the first allowed one in the queue. -> True - a post went out."""
         if self.st[slot_of(kind)] is not None:
-            return
-        have = None
+            return False
+        have, go = None, (True, None)
         while True:
             item = next((p for p in self.st["posts"] if (p["kind"] == "deck") == (kind == "deck")), None)
             if item is None:
-                return
+                return False
+            if kind != "deck":
+                item, go = next(((p, g) for p in self.st["posts"] if p["kind"] != "deck" and (g := self.gate(p))), (None, None))
+                if item is None:
+                    return False
             if kind == "deck":
                 if have is None:
                     have = self.listed()
                     if have is None:
                         self.deck_after = self.clock() + RETRY
-                        return
+                        return False
                 if item["ref"] not in have:
                     self.st["posts"].remove(item)
                     continue
@@ -463,7 +543,9 @@ class Plugin:
         self.st["posts"].remove(item)
         rev = self.st["revs"][item["key"]] = self.st["revs"].get(item["key"], 0) + 1
         ref = item["ref"][:180] + (f" (v{rev})" if rev > 1 and item["kind"] == "drafts" else "")   # for the deck the ref is the card id
-        self.emit_post(item, ref)
+        self.emit_post(item, ref, silent=not go[0])
+        if go[1]:
+            self.st["digest"] = go[1]   # this weekend digest has its sound: the rest of it goes silent
         self.st[slot_of(kind)] = {**item, "ref": ref, "at": self.clock()}
         self.st["sent"][ref] = {"kind": item["kind"], "key": item["key"]}
         if item["kind"] == "deck":
@@ -472,10 +554,12 @@ class Plugin:
         for d, keep in ((self.st["sent"], KEEP_SENT), (self.st["revs"], KEEP_REVS), (self.st["seen"], KEEP_SEEN)):
             while len(d) > keep:
                 del d[next(iter(d))]
+        return True
 
-    def emit_post(self, item, ref):
-        """A post in Telegram: caption, ❤️ 👎 buttons, file and session; a deck card's number comes from the deck at the moment of sending."""
-        data = {"text": item["text"], "ref": ref, "buttons": [LIKE, NOPE]}
+    def emit_post(self, item, ref, silent=False):
+        """A post in Telegram: caption, ❤️ 👎 buttons, file and session; a deck card's number comes from the deck at the moment of sending.
+        silent - no notification sound (the bot of a core that knows `silent` sends it with disable_notification; an older one ignores it)."""
+        data = {"text": item["text"], "ref": ref, "buttons": [LIKE, NOPE], **({"silent": True} if silent else {})}
         if item["kind"] == "deck":   # the number is taken at the moment of sending: fresh for deck --id and after revision
             badge = self.badge(item["ref"])
             if badge:
@@ -505,9 +589,13 @@ class Plugin:
     def remind(self):
         """The reminder about the open posts: a deck card is checked against the deck first - rated there already (on its page)
         means closed quietly and the next one goes out instead; the deck is silent - not sent blind, retried after RETRY."""
-        left = []
+        left, done = [], False
         for o in self.opens():
             if o["ref"] not in self.again_refs():
+                continue
+            go = (True, None) if o["kind"] == "deck" else self.gate(o, reminder=True)
+            if go is None:   # the owner's quiet time: the reminder waits
+                left.append(o["ref"])
                 continue
             if o["kind"] == "deck":
                 have = self.listed()
@@ -518,9 +606,13 @@ class Plugin:
                 if o["ref"] not in have:
                     self.close_quiet(o["ref"])
                     self.pump()
+                    done = True
                     continue
-            self.emit_post(o, o["ref"])
+            self.emit_post(o, o["ref"], silent=not go[0])
+            done = True
+        done = done or (left or False) != self.st["again"]
         self.st["again"] = left or False
+        return done
 
     def answer(self, ref, text):
         """`tg-posts reply`: an answer to the owner's question about a post - to Telegram as a reply to the post's latest
@@ -543,6 +635,7 @@ class Plugin:
         version of a revised one (the owner replied to it) stands first in the queue, not displacing the open one. A deck card in revision
         returns only from the deck (fresh - `tg-posts deck --id`), even if unchanged; a plain `deck` does not take it."""
         key, st, fresh = item["key"], self.st, item.pop("fresh", False)
+        item.setdefault("at", self.clock())
         o = st[slot_of(item["kind"])]
         old = o if o and o["key"] == key else next((p for p in st["posts"] if p["key"] == key), None)
         if old is None and key in st["revising"] and item["kind"] == "deck":
@@ -558,6 +651,7 @@ class Plugin:
             if all(old.get(k) == item.get(k) for k in ("text", "path", "img")):
                 return "same"
             del st["revising"][key]
+            item["answer"] = True   # an answer to the owner's reply: not held for a weekend digest
             st["posts"].insert(0, item)
             return "revised"
         if fresh and item["kind"] == "deck" and old is not None and old is not o:   # waits in the queue - came back edited: first
@@ -593,6 +687,7 @@ class Plugin:
             st[SLOT_DRAFTS] = None
             st["posts"].insert(0, item)
         else:
+            item["at"] = old.get("at") or item["at"]   # the edited post keeps its place in the digest
             st["posts"][st["posts"].index(old)] = item
         return "revised"
 
@@ -658,10 +753,9 @@ class Plugin:
         self.inbox()
         ready = self.deck_after <= self.clock()   # the deck was silent: no deck question before this time (a session's post does not need it)
         if self.st["again"] and (ready or not any(o["kind"] == "deck" for o in self.opens())):   # a reminder waited for the deck: ask again
-            self.remind()
-            self.save()
-        if self.waiting("drafts"):
-            self.pump_kind("drafts")
+            if self.remind():
+                self.save()
+        if self.waiting("drafts") and self.pump_kind("drafts"):   # held by the quiet time - nothing changed, nothing to save
             self.save()
         if ready and self.waiting("deck"):   # a card waited for the deck: ask again
             self.pump_kind("deck")

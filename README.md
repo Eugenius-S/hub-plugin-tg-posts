@@ -13,6 +13,14 @@ goes out when the open one is closed with a ❤️ or 👎 button or when the ow
   queue, right after the open one, and goes out when that one is reviewed. ❤️ / 👎 under the old message of a revised post
   closes it as usual. A version of a post that was not replied to replaces it in place (an open one goes out again).
   A new draft post does not wait for deck cards: it goes out at once if the session place is free, otherwise after the other draft posts.
+- **Quiet time.** Session posts (not deck cards) respect the owner's quiet time, in the hub time zone (`hub.json`
+  `timezone`). Every day 20:00-08:30 nothing goes out: the post waits in the queue (the hours follow `core/owner.py`
+  when the hub has it). On Saturday and Sunday posts gather and go once a day at 12:00: the first one with a sound,
+  the next ones (as the owner closes each) silent (`silent: true` in `telegram.post`; a bot that does not know the field
+  ignores it). A post that came after the day's digest waits for the next one; Friday 20:00 to Monday 08:30 is quiet
+  as a whole. A revision (the owner replied to a post) is not held for the digest, only for the quiet time; a
+  reminder (`tg-posts again`) waits out the quiet time too. Settings: `"extensions": {"<plugin name>": {"quiet": true,
+  "weekend_digest_at": "12:00"}}`; `"quiet": false` - as before 0.14.
 - **Deck.** Cards with ❤️ 👎 buttons - also one at a time (an open session post does not count). The plugin passes a press and a reply in words to the deck
   server itself (`/api/decide`, `/api/direct` with `from: "tg-posts"`) - without a session turn. A reply to a card is a
   revision, like with draft posts: the owner immediately gets the next one, the deck edits the card in the background and

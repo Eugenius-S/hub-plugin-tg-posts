@@ -291,13 +291,22 @@ class Cli(Base):
         self.assertEqual(cli.deck_url(cli.argparse.Namespace(url=None), self.dir), "http://deck:1")
 
 
+# 2026-10-28 is a Wednesday; the hub zone is UTC (hub.json has no timezone)
+WED_NOON, WED_23, THU_0829, THU_0830 = 1793188800.0, 1793228400.0, 1793262540.0, 1793262600.0
+WED_1959, WED_2000 = 1793217540.0, 1793217600.0
+FRI_19, FRI_21 = 1793386800.0, 1793394000.0
+SAT_10, SAT_12, SAT_1230, SAT_20 = 1793440800.0, 1793448000.0, 1793449800.0, 1793476800.0
+SUN_1159, SUN_12, SUN_13 = 1793534340.0, 1793534400.0, 1793538000.0
+MON_0829, MON_0830 = 1793608140.0, 1793608200.0
+
+
 class Process(Base):
     def setUp(self):
         super().setUp()
         self.deck = Deck([])
         with open(os.environ["HUB_CONFIG"], "w", encoding="utf-8") as f:
             json.dump({"extensions": {"tg-posts": {"deck": self.deck.url}}}, f)
-        self.now = 1000.0
+        self.now = WED_NOON   # a weekday daytime: no quiet time
         self.lang = mock.patch.object(main, "_lang", lambda: "en")   # the hub language is pinned: the tests do not read a live hub
         self.lang.start()
 
@@ -1772,6 +1781,146 @@ class Process(Base):
         self.plugin().poll()
         self.assertEqual(self.deck.calls, [])
 
+
+    def settings(self, **kw):
+        with open(os.environ["HUB_CONFIG"], "w", encoding="utf-8") as f:
+            json.dump({"extensions": {"tg-posts": {"deck": self.deck.url, **kw}}}, f)
+
+    def go(self, p, ts):
+        self.now = ts
+        p.poll()
+        return self.posts()
+
+    def test_quiet_night_holds_a_session_post_until_half_past_eight(self):
+        p = self.plugin()
+        self.now = WED_1959
+        self.queue(self.draft(1))
+        self.assertEqual(len(self.go(p, WED_1959)), 1)   # 19:59 - the evening is still open
+        self.press("d.md #1 Post", "\u2764\ufe0f")
+        self.queue(self.draft(2))
+        self.assertEqual(self.go(p, WED_2000), [])   # 20:00 - the quiet time
+        self.assertEqual(self.go(p, WED_23), [])
+        self.assertEqual(self.go(p, THU_0829), [])
+        sent = self.go(p, THU_0830)
+        self.assertEqual([x["ref"] for x in sent], ["d.md #2 Post"])
+        self.assertNotIn("silent", sent[0])   # a weekday - with a sound
+
+    def test_quiet_time_does_not_hold_deck_cards(self):
+        p = self.plugin()
+        self.queue(self.card("a"))
+        self.assertEqual([x["ref"] for x in self.go(p, WED_23)], ["a"])
+
+    def test_weekday_daytime_post_goes_at_once(self):
+        p = self.plugin()
+        self.queue(self.draft(1))
+        sent = self.go(p, WED_NOON)
+        self.assertEqual([x["ref"] for x in sent], ["d.md #1 Post"])
+        self.assertNotIn("silent", sent[0])
+
+    def test_saturday_posts_gather_and_go_at_noon_the_first_with_a_sound(self):
+        p = self.plugin()
+        self.now = SAT_10
+        self.queue(self.draft(1), self.draft(2))
+        self.assertEqual(self.go(p, SAT_10), [])
+        sent = self.go(p, SAT_12)
+        self.assertEqual([x["ref"] for x in sent], ["d.md #1 Post"])
+        self.assertNotIn("silent", sent[0])
+        self.press("d.md #1 Post", "\u2764\ufe0f")
+        self.now += 5
+        p.poll()
+        sent = self.posts()
+        self.assertEqual([x["ref"] for x in sent], ["d.md #2 Post"])
+        self.assertTrue(sent[0]["silent"])   # the rest of the digest - no sound
+
+    def test_a_post_after_saturdays_digest_waits_for_sunday_noon(self):
+        p = self.plugin()
+        self.now = SAT_10
+        self.queue(self.draft(1))
+        self.assertEqual(len(self.go(p, SAT_12)), 1)
+        self.press("d.md #1 Post", "\u2764\ufe0f")
+        self.now = SAT_1230
+        self.queue(self.draft(2))
+        self.assertEqual(self.go(p, SAT_1230), [])
+        self.assertEqual(self.go(p, SAT_20), [])
+        self.assertEqual(self.go(p, SUN_1159), [])
+        sent = self.go(p, SUN_12)
+        self.assertEqual([x["ref"] for x in sent], ["d.md #2 Post"])
+        self.assertNotIn("silent", sent[0])   # the Sunday digest has its own sound
+
+    def test_a_post_after_sundays_digest_waits_for_monday_half_past_eight(self):
+        p = self.plugin()
+        self.now = SUN_12
+        self.queue(self.draft(1))
+        self.assertEqual(len(self.go(p, SUN_12)), 1)
+        self.press("d.md #1 Post", "\u2764\ufe0f")
+        self.now = SUN_13
+        self.queue(self.draft(2))
+        self.assertEqual(self.go(p, SUN_13), [])
+        self.assertEqual(self.go(p, MON_0829), [])
+        sent = self.go(p, MON_0830)
+        self.assertEqual([x["ref"] for x in sent], ["d.md #2 Post"])
+        self.assertNotIn("silent", sent[0])
+
+    def test_friday_evening_starts_the_weekend_quiet(self):
+        p = self.plugin()
+        self.now = FRI_19
+        self.queue(self.draft(1))
+        self.assertEqual(len(self.go(p, FRI_19)), 1)   # Friday before 20:00 - a weekday
+        self.press("d.md #1 Post", "\u2764\ufe0f")
+        self.now = FRI_21
+        self.queue(self.draft(2))
+        self.assertEqual(self.go(p, FRI_21), [])
+        self.assertEqual(self.go(p, SAT_10), [])
+        self.assertEqual([x["ref"] for x in self.go(p, SAT_12)], ["d.md #2 Post"])
+
+    def test_a_revision_on_a_weekend_is_not_held_for_the_digest_but_for_the_night(self):
+        p = self.plugin()
+        self.now = SAT_12
+        self.queue(self.draft(1))
+        self.assertEqual(len(self.go(p, SAT_12)), 1)
+        self.reply("d.md #1 Post")
+        p.poll()
+        self.posts()
+        self.queue(self.draft(1, text="1. Post\n\nshorter"))   # the session answers the reply
+        self.now = SAT_20 - 60
+        p.poll()
+        self.assertEqual([x["text"] for x in self.posts()], ["1. Post\n\nshorter"])   # a revision - no wait for Sunday
+        self.press("d.md #1 Post", "\u2764\ufe0f")
+        self.reply("d.md #1 Post", text="again")
+        p.poll()
+        self.queue(self.draft(1, text="1. Post\n\nshortest"))
+        self.now = SAT_20
+        p.poll()
+        self.assertEqual(self.posts(), [])   # at night - waits
+
+    def test_quiet_false_keeps_the_old_behavior(self):
+        self.settings(quiet=False)
+        p = self.plugin()
+        self.queue(self.draft(1))
+        sent = self.go(p, WED_23)
+        self.assertEqual([x["ref"] for x in sent], ["d.md #1 Post"])
+        self.press("d.md #1 Post", "\u2764\ufe0f")
+        self.queue(self.draft(2))
+        sent = self.go(p, SAT_10)
+        self.assertEqual([x["ref"] for x in sent], ["d.md #2 Post"])
+        self.assertNotIn("silent", sent[0])
+
+    def test_the_digest_hour_and_the_zone_come_from_the_settings(self):
+        with open(os.environ["HUB_CONFIG"], "w", encoding="utf-8") as f:
+            json.dump({"timezone": "Asia/Novosibirsk", "extensions": {"tg-posts": {"deck": self.deck.url, "weekend_digest_at": "10:00"}}}, f)
+        p = self.plugin()
+        self.now = SAT_10 - 7 * 3600   # Saturday 03:00 UTC = 10:00 in Novosibirsk
+        self.queue(self.draft(1))
+        self.assertEqual(len(self.go(p, SAT_10 - 7 * 3600)), 1)
+
+    def test_a_reminder_waits_out_the_quiet_time(self):
+        p = self.plugin()
+        self.queue(self.draft(1))
+        self.assertEqual(len(self.go(p, WED_NOON)), 1)
+        self.now = WED_23
+        self.again("d.md #1 Post")
+        self.assertEqual(self.go(p, WED_23), [])
+        self.assertEqual([x["ref"] for x in self.go(p, THU_0830)], ["d.md #1 Post"])
 
 if __name__ == "__main__":
     unittest.main()
