@@ -5,9 +5,10 @@ description: Send the owner draft posts or deck cards in Telegram, one at a time
 
 # Posts in Telegram
 
-Posts go to the owner **one at a time**. The commands put them into the plugin's queue; one unreviewed post hangs in
-Telegram (a picture, a caption, ❤️ 👎 buttons), and the next one goes out when this one is closed with a button or the
-owner replied to it. You wait for nothing and send nothing later: put the whole batch into the queue at once.
+Posts go to the owner **one at a time per place**. The commands put them into the plugin's queue; Telegram has two
+places - one unreviewed deck card and one unreviewed session post (a picture, a caption, ❤️ 👎 buttons), so two open posts
+at once is normal. Your post goes out at once, even if a deck card hangs; the next one of yours goes out when this one is
+closed with a button or the owner replied to it. You wait for nothing and send nothing later: put the whole batch into the queue at once.
 
 ## Draft posts from a drafts file
 

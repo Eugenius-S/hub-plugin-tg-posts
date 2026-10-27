@@ -1,9 +1,10 @@
 # tg-posts - posts in Telegram
 
 An [Agents Hub](https://github.com/flagman/agents-hub-core) plugin: a session sends the owner posts in Telegram **one at
-a time** - a picture with a caption. The commands put posts into the plugin's queue; one unreviewed post hangs in
-Telegram, and the next one goes out when this one is closed with a ❤️ or 👎 button or when the owner replied to it
-(revision).
+a time** - a picture with a caption. The commands put posts into the plugin's queue. Telegram has two independent
+places: one unreviewed deck card and one unreviewed session post, so there are sometimes two open posts at once. A
+session post goes out at once, even while a deck card hangs, and does not hold the card; inside one place the next post
+goes out when the open one is closed with a ❤️ or 👎 button or when the owner replied to it (revision).
 
 - **Draft posts.** From a drafts file (`## N. Title`). ❤️ - approved, 👎 - rejected outright: both close the post, and
   the session gets a message with the number, the title, the file and the verdict. A reply by voice or text is a
@@ -11,8 +12,8 @@ Telegram, and the next one goes out when this one is closed with a ❤️ or �
   post has already gone out; the session sends the new version as usual (`drafts --only N`) - it stands first in the
   queue, right after the open one, and goes out when that one is reviewed. ❤️ / 👎 under the old message of a revised post
   closes it as usual. A version of a post that was not replied to replaces it in place (an open one goes out again).
-  A new draft post does not wait behind deck cards: it is queued after the other draft posts, before the cards.
-- **Deck.** Cards with ❤️ 👎 buttons - also one at a time. The plugin passes a press and a reply in words to the deck
+  A new draft post does not wait for deck cards: it goes out at once if the session place is free, otherwise after the other draft posts.
+- **Deck.** Cards with ❤️ 👎 buttons - also one at a time (an open session post does not count). The plugin passes a press and a reply in words to the deck
   server itself (`/api/decide`, `/api/direct` with `from: "tg-posts"`) - without a session turn. A reply to a card is a
   revision, like with draft posts: the owner immediately gets the next one, the deck edits the card in the background and
   when ready calls `tg-posts deck --id <id>` - the new version stands first in the queue, right after the open one (both

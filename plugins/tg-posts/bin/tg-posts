@@ -75,8 +75,8 @@ def verdicts(state, items):
         return ["new"] * len(items)
     have = {k: p for k, p in (st.get("revising") or {}).items() if isinstance(p, dict)}   # those in revision - their new version is also "the same"
     have.update({p["key"]: p for p in (st.get("posts") or []) if isinstance(p, dict) and "key" in p})
-    o = st.get("open")
-    if isinstance(o, dict) and "key" in o:
+    opened = [o for o in (st.get("open"), st.get("open_drafts")) if isinstance(o, dict) and "key" in o]   # two places: a deck card, a session's post
+    for o in opened:
         have[o["key"]] = o
     out = []
     for it in items:
@@ -85,7 +85,7 @@ def verdicts(state, items):
             shown = it.get("ref") in (st.get("seen") or {}) or (st.get("sent") or {}).get(it.get("ref"), {}).get("kind") == "deck"
             out.append("same" if it["kind"] == "deck" and not it.get("fresh") and shown else "new")   # the plugin does not send a shown card a second time
         elif it["kind"] == "deck":
-            out.append("revised" if it.get("fresh") and old is not o else "same")   # it does not touch the open one; a waiting one and one in revision come back first
+            out.append("revised" if it.get("fresh") and not any(old is o for o in opened) else "same")   # it does not touch the open one; a waiting one and one in revision come back first
         else:
             path, img = (it.get("path"), it.get("img")) if it.get("path") else (old.get("path"), old.get("img"))
             same = it["text"] == old.get("text") and path == old.get("path") and img == old.get("img")
@@ -242,9 +242,12 @@ def cmd_status(a, state):
             st = json.load(f)
     except (OSError, ValueError):
         sys.exit("no plugin state: the plugin process is not running or has not received anything yet")
-    o, posts = st.get("open"), st.get("posts") or []
+    opened = [o for o in (st.get("open"), st.get("open_drafts")) if isinstance(o, dict)]
+    posts = st.get("posts") or []
     new = sum(n.endswith(".json") for n in os.listdir(inbox(state))) if os.path.isdir(inbox(state)) else 0
-    print("open in Telegram: " + (f"{o['ref']} (since {time.strftime('%d.%m %H:%M', time.localtime(o['at']))})" if o else "nothing"))
+    for kind, label in (("deck", "open in Telegram"), ("drafts", "open session post")):
+        o = next((o for o in opened if (o.get("kind") == "deck") == (kind == "deck")), None)
+        print(f"{label}: " + (f"{o['ref']} (since {time.strftime('%d.%m %H:%M', time.localtime(o['at']))})" if o else "nothing"))
     print(f"in the queue: {len(posts)}" + "".join(f"\n  {p['ref']}" for p in posts[:10]) + ("\n  …" if len(posts) > 10 else ""))
     if new:
         print(f"not yet parsed by the plugin: {new} command(s)")
@@ -264,17 +267,21 @@ def cmd_again(a, state):
     """The plugin state is read only (like status): no open post or the ref is not open - nothing goes into the inbox."""
     try:
         with open(os.path.join(state, EXT, "state.json"), encoding="utf-8") as f:
-            o = json.load(f).get("open")
+            st = json.load(f)
     except (OSError, ValueError):
         sys.exit("no plugin state: the plugin process is not running or has not received anything yet")
-    if not isinstance(o, dict):
+    opened = [o for o in (st.get("open"), st.get("open_drafts")) if isinstance(o, dict)]
+    if not opened:
         print("no open post - nothing to send")
         return
-    if a.ref and a.ref not in (o.get("ref"), o.get("key")):
-        print(f"{a.ref} is not open (open: {o.get('ref')}) - nothing to send")
+    mine = [o for o in opened if not a.ref or a.ref in (o.get("ref"), o.get("key"))]
+    if not mine:
+        print(f"{a.ref} is not open (open: {', '.join(str(o.get('ref')) for o in opened)}) - nothing to send")
         return
-    put(state, {"op": "again", "ref": o["ref"]})
-    print(f"{o['ref']}: sending it once more as a new message; it is the same post - buttons and replies on the old and the new message belong to it, the queue does not move")
+    for o in mine:
+        put(state, {"op": "again", "ref": o["ref"]})
+    o = mine[0]
+    print(f"{', '.join(str(o['ref']) for o in mine)}: sending it once more as a new message; it is the same post - buttons and replies on the old and the new message belong to it, the queue does not move")
 
 
 def cmd_reply(a, state):

@@ -31,6 +31,7 @@ WHY_HOLD = 1200   # s: a deck card rejection waits this long for a reason, then 
 WHY_DECK = ["stale", "off-brand", "not-design", "weak-visual", "soft", "dupe", "boring", "changed-mind"]   # reasons of the deck web UI: reason codes in /api/decide, STR key suffixes
 WHY_DRAFTS = ["bored", "off-topic", "weak-image", "long", "off-tone"]   # reasons for a draft post: STR key suffixes
 KEEP_WHY = 200
+SLOT_DECK, SLOT_DRAFTS = "open", "open_drafts"   # st keys of the two places in Telegram: a deck card, a session's post
 HEAD_MAX = 200   # the post caption's first line above an answer (tg-posts reply)
 
 
@@ -147,6 +148,11 @@ def deck_url(state):
     return "http://localhost:7777"
 
 
+def slot_of(kind):
+    """st key of the place in Telegram for a post kind."""
+    return SLOT_DECK if kind == "deck" else SLOT_DRAFTS
+
+
 def request(ev):
     """Fact -> (API path, body) or None (not ours, not a deck card)."""
     data = ev.get("data") or {}
@@ -184,11 +190,18 @@ class Plugin:
             self.handle(journal.read_tail(self.path))
 
     def shape(self):
-        """jobs - what waits for the deck (before 0.2.0 it lay in queue), posts - the post queue, open - the only post in Telegram."""
+        """jobs - what waits for the deck (before 0.2.0 it lay in queue), posts - the post queue, open - the deck card in Telegram,
+        open_drafts - the session's post in Telegram (before 0.13.0 `open` held either: a session's post moves to its own place)."""
         st = self.st
         st.setdefault("jobs", st.pop("queue", None) or [])
         st.setdefault("posts", [])
         st.setdefault("open", None)
+        st.setdefault("open_drafts", None)
+        o = st["open"]
+        if o and o.get("kind") != "deck":
+            if st["open_drafts"] is None:
+                st["open_drafts"] = o
+            st["open"] = None
         st.setdefault("revising", {})   # post key -> the post the owner replied to: went to the session for revision, waits for a new version
         st.setdefault("sent", {})   # ref -> which post went out (draft or card): a press is recognized by it
         st.setdefault("why", {})   # ref of a "Why?" question -> what it is about (deck card or draft post): the reason is recognized by it
@@ -263,30 +276,30 @@ class Plugin:
     def react(self, ev):
         """A press and a reply by ref: a draft post is known by `sent`, everything else (including deck cards that went out
         before the queue) - as before, to the deck."""
-        data, now_open = ev.get("data") or {}, self.st["open"]
+        data, deck_open, post_open = ev.get("data") or {}, self.st["open"], self.st["open_drafts"]
         if data.get("ext") == EXT and data.get("ref") in self.st["why"]:   # an answer to "Why?": a button or a reply in words
             if ev.get("type") == "telegram.pressed":
                 self.answer_why(data["ref"], button=data.get("button"))
             elif ev.get("type") == "telegram.replied" and (data.get("text") or "").strip():
                 self.answer_why(data["ref"], text=data["text"].strip())
             return
-        if now_open and now_open["kind"] == "drafts" and replied_ref(ev, now_open["session"]) == now_open["ref"]:
-            return self.revise()
+        if post_open and replied_ref(ev, post_open["session"]) == post_open["ref"]:
+            return self.revise(post_open)
         if data.get("ext") != EXT or not data.get("ref"):
             return
         info = self.st["sent"].get(data["ref"]) or {}
         if info.get("kind") == "drafts":   # the bot hands a reply to it to the session itself; here - a press under the open or revised one
             if ev.get("type") == "telegram.pressed" and data.get("button") in (LIKE, NOPE):
-                if now_open and now_open["ref"] == data["ref"]:
-                    self.close(data["button"])
+                if post_open and post_open["ref"] == data["ref"]:
+                    self.close(data["button"], post_open)
                 else:
                     rev = next((o for o in self.st["revising"].values() if o["ref"] == data["ref"]), None)
                     if rev:
                         self.close(data["button"], rev)
             return
         if ev.get("type") == "telegram.pressed" and data.get("button") in (LIKE, NOPE):
-            if now_open and now_open["ref"] == data["ref"]:
-                return self.close(data["button"])
+            if deck_open and deck_open["ref"] == data["ref"]:
+                return self.close(data["button"], deck_open)
             rev = self.st["revising"].get(data["ref"])
             if rev and rev["kind"] == "deck":   # a card in revision: the button under its message closes the card
                 return self.close(data["button"], rev)
@@ -298,8 +311,8 @@ class Plugin:
         req = request(ev)
         if req:
             self.job(*req)
-            if req[0] == "/api/direct" and now_open and now_open["kind"] == "deck" and now_open["ref"] == data["ref"]:
-                self.revise()   # a reply to the open card is a revision: it goes to the deck, the next one goes to the owner at once
+            if req[0] == "/api/direct" and deck_open and deck_open["ref"] == data["ref"]:
+                self.revise(deck_open)   # a reply to the open card is a revision: it goes to the deck, the next one goes to the owner at once
 
     def job(self, path, body):
         self.st["jobs"].append({"path": path, "body": body, "since": self.clock(), "next": 0})
@@ -367,10 +380,10 @@ class Plugin:
             "text": f"tg-posts: the reason the owner rejected post {w['n']} \"{w['title']}\" (file {w['file']}): "
                     f"{reason}. Take it into account in the next posts; do not bring the post back."})
 
-    def revise(self):
-        """A reply to the open draft post: it goes to revision, and the next one from the queue goes to the owner (while the
-        session makes a new version). The new version stands first in the queue (enqueue)."""
-        o, self.st["open"] = self.st["open"], None
+    def revise(self, o):
+        """A reply to the open post o (its own place): it goes to revision, and the next one of its kind from the queue goes to
+        the owner (while the session or the deck makes a new version). The new version stands first in the queue (enqueue)."""
+        self.st[slot_of(o["kind"])] = None
         rv = self.st["revising"]
         rv.pop(o["key"], None)
         rv[o["key"]] = o
@@ -378,10 +391,10 @@ class Plugin:
             del rv[next(iter(rv))]
         self.pump()
 
-    def close(self, button, o=None):
-        """❤️ / 👎 under the open post (or under a post in revision - o): close it, tell whoever needs to know; the open one - send the next."""
-        if o is None:
-            o, self.st["open"] = self.st["open"], None
+    def close(self, button, o):
+        """❤️ / 👎 under the open post (or under a post in revision) o: close it, tell whoever needs to know; the open one - send the next."""
+        if self.st[slot_of(o["kind"])] is o:
+            self.st[slot_of(o["kind"])] = None
         else:
             self.st["revising"].pop(o["key"], None)
         if o["kind"] == "deck":
@@ -391,7 +404,7 @@ class Plugin:
             else:
                 self.reject_deck(o["ref"])
         else:
-            left = len(self.st["posts"])
+            left = sum(1 for p in self.st["posts"] if p["kind"] != "deck")   # the session's own queue: cards are not its business
             tail = f" {left} more in the queue." if left else " The queue is empty - you can send the next one."
             what = ("approved - mark it in the file" if button == LIKE
                     else "rejected outright - remove the post from the file and do not return to it")
@@ -408,35 +421,50 @@ class Plugin:
         self.cancel_held(ref)
         self.st["posts"] = [p for p in self.st["posts"] if p["ref"] != ref]
         self.st["revising"] = {k: p for k, p in self.st["revising"].items() if p["ref"] != ref}
-        if self.st["open"] and self.st["open"]["ref"] == ref:
-            self.st["open"] = None
+        for k in (SLOT_DECK, SLOT_DRAFTS):
+            if self.st[k] and self.st[k]["ref"] == ref:
+                self.st[k] = None
+
+    def opens(self):
+        """The posts hanging in Telegram: the deck card, the session's post."""
+        return [o for o in (self.st[SLOT_DECK], self.st[SLOT_DRAFTS]) if o]
+
+    def waiting(self, kind):
+        """Is there a post of this kind in the queue and a free place in Telegram for it."""
+        return self.st[slot_of(kind)] is None and any((p["kind"] == "deck") == (kind == "deck") for p in self.st["posts"])
 
     def pump(self):
-        """One unreviewed post hangs in Telegram: nothing open - send the next one from the queue. A deck card goes only if the
+        """Two places in Telegram, each holds one unreviewed post: a session's post and a deck card do not wait for each other.
+        The session's post goes first - it never waits for the deck."""
+        self.pump_kind("drafts")
+        self.pump_kind("deck")
+
+    def pump_kind(self, kind):
+        """The place of this kind is free - send the next post of the kind from the queue. A deck card goes only if the
         deck still lists it as unrated (it may have been rated on the deck page while it waited - then it is dropped quietly,
         the next one is taken); the deck is silent - nothing goes blind, the next attempt is after RETRY."""
-        if self.st["open"] is not None:
+        if self.st[slot_of(kind)] is not None:
             return
         have = None
-        while self.st["posts"]:
-            item = self.st["posts"][0]
-            if item["kind"] == "deck":
+        while True:
+            item = next((p for p in self.st["posts"] if (p["kind"] == "deck") == (kind == "deck")), None)
+            if item is None:
+                return
+            if kind == "deck":
                 if have is None:
                     have = self.listed()
                     if have is None:
                         self.deck_after = self.clock() + RETRY
                         return
                 if item["ref"] not in have:
-                    self.st["posts"].pop(0)
+                    self.st["posts"].remove(item)
                     continue
             break
-        else:
-            return
-        self.st["posts"].pop(0)
+        self.st["posts"].remove(item)
         rev = self.st["revs"][item["key"]] = self.st["revs"].get(item["key"], 0) + 1
         ref = item["ref"][:180] + (f" (v{rev})" if rev > 1 and item["kind"] == "drafts" else "")   # for the deck the ref is the card id
         self.emit_post(item, ref)
-        self.st["open"] = {**item, "ref": ref, "at": self.clock()}
+        self.st[slot_of(kind)] = {**item, "ref": ref, "at": self.clock()}
         self.st["sent"][ref] = {"kind": item["kind"], "key": item["key"]}
         if item["kind"] == "deck":
             self.st["seen"].pop(ref, None)
@@ -458,34 +486,41 @@ class Plugin:
         emit(self.dir, "telegram.post", data)
 
     def again(self, ref=""):
-        """`tg-posts again`: the open post goes to Telegram once more - a new message at the bottom, with the same ref. The bot recognizes buttons and
+        """`tg-posts again`: an open post goes to Telegram once more - a new message at the bottom, with the same ref. The bot recognizes buttons and
         replies by ref, so the old and the new message are one and the same post. The state (open, queue, seen, revs) does not
-        change: the next one is not released, the version is not new. -> True - sent; nothing open or the ref is not its - False."""
-        o = self.st["open"]
-        if o is None or ref not in ("", o["ref"], o["key"]):
+        change: the next one is not released, the version is not new. No ref - every open post (the card and the session's one).
+        -> True - sent; nothing open or the ref is not an open one - False."""
+        want = [o["ref"] for o in self.opens() if ref in ("", o["ref"], o["key"])]
+        if not want:
             return False
-        self.st["again"] = True
+        self.st["again"] = [r for r in dict.fromkeys([*self.again_refs(), *want])]
         self.remind()
         return True
 
+    def again_refs(self):
+        """Refs waiting for a reminder (before 0.13.0 `again` was a flag: it meant the one open post)."""
+        a = self.st["again"]
+        return [o["ref"] for o in self.opens()] if a is True else list(a or [])
+
     def remind(self):
-        """The reminder about the open card: a deck card is checked against the deck first - rated there already (on its page)
+        """The reminder about the open posts: a deck card is checked against the deck first - rated there already (on its page)
         means closed quietly and the next one goes out instead; the deck is silent - not sent blind, retried after RETRY."""
-        o = self.st["open"]
-        if o is None:
-            self.st["again"] = False
-            return
-        if o["kind"] == "deck":
-            have = self.listed()
-            if have is None:
-                self.deck_after = self.clock() + RETRY
-                return
-            if o["ref"] not in have:
-                self.st["again"] = False
-                self.close_quiet(o["ref"])
-                return self.pump()
-        self.st["again"] = False
-        self.emit_post(o, o["ref"])
+        left = []
+        for o in self.opens():
+            if o["ref"] not in self.again_refs():
+                continue
+            if o["kind"] == "deck":
+                have = self.listed()
+                if have is None:
+                    self.deck_after = self.clock() + RETRY
+                    left.append(o["ref"])
+                    continue
+                if o["ref"] not in have:
+                    self.close_quiet(o["ref"])
+                    self.pump()
+                    continue
+            self.emit_post(o, o["ref"])
+        self.st["again"] = left or False
 
     def answer(self, ref, text):
         """`tg-posts reply`: an answer to the owner's question about a post - to Telegram as a reply to the post's latest
@@ -495,7 +530,7 @@ class Plugin:
         text = text.strip()
         if not ref or not text:
             return False
-        o = next((p for p in (self.st["open"], *self.st["revising"].values(), *self.st["posts"])
+        o = next((p for p in (*self.opens(), *self.st["revising"].values(), *self.st["posts"])
                   if p and ref in (p["ref"], p["key"])), None)
         head = next((ln.strip() for ln in str((o or {}).get("text") or "").splitlines() if ln.strip()), "") or ref
         emit(self.dir, "telegram.post", {"text": f"{head[:HEAD_MAX]}\n\n{text}", "reply_text": text,
@@ -508,7 +543,7 @@ class Plugin:
         version of a revised one (the owner replied to it) stands first in the queue, not displacing the open one. A deck card in revision
         returns only from the deck (fresh - `tg-posts deck --id`), even if unchanged; a plain `deck` does not take it."""
         key, st, fresh = item["key"], self.st, item.pop("fresh", False)
-        o = st["open"]
+        o = st[slot_of(item["kind"])]
         old = o if o and o["key"] == key else next((p for p in st["posts"] if p["key"] == key), None)
         if old is None and key in st["revising"] and item["kind"] == "deck":
             if not fresh:
@@ -546,7 +581,7 @@ class Plugin:
         if item["kind"] == "deck":
             if fresh and old is o and any(old.get(k) != item.get(k) for k in ("text", "path", "img")):
                 self.cancel_held(o["ref"])   # the open card came back edited from the deck: the old one is closed without a rating, the new one goes at once
-                st["open"] = None
+                st[SLOT_DECK] = None
                 st["posts"].insert(0, item)
                 return "revised"
             return "same"
@@ -555,7 +590,7 @@ class Plugin:
         if all(old.get(k) == item.get(k) for k in ("text", "path", "img")):   # img is the file fingerprint: the same path, another picture - a new version
             return "same"
         if old is o:
-            st["open"] = None
+            st[SLOT_DRAFTS] = None
             st["posts"].insert(0, item)
         else:
             st["posts"][st["posts"].index(old)] = item
@@ -577,7 +612,7 @@ class Plugin:
                 with open(os.path.join(d, n), encoding="utf-8") as f:
                     cmd = json.load(f)
                 if cmd.get("op") == "clear":
-                    self.st["posts"], self.st["open"], self.st["revising"] = [], None, {}
+                    self.st["posts"], self.st[SLOT_DECK], self.st[SLOT_DRAFTS], self.st["revising"] = [], None, None, {}
                 elif cmd.get("op") == "again":
                     self.again(str(cmd.get("ref") or ""))
                 elif cmd.get("op") == "reply":
@@ -621,11 +656,15 @@ class Plugin:
 
     def poll(self):
         self.inbox()
-        if self.deck_after <= self.clock() and (self.st["again"] or self.st["open"] is None and self.st["posts"]):
-            if self.st["again"]:   # a reminder or a card waited for the deck: ask again
-                self.remind()
-            else:
-                self.pump()
+        ready = self.deck_after <= self.clock()   # the deck was silent: no deck question before this time (a session's post does not need it)
+        if self.st["again"] and (ready or not any(o["kind"] == "deck" for o in self.opens())):   # a reminder waited for the deck: ask again
+            self.remind()
+            self.save()
+        if self.waiting("drafts"):
+            self.pump_kind("drafts")
+            self.save()
+        if ready and self.waiting("deck"):   # a card waited for the deck: ask again
+            self.pump_kind("deck")
             self.save()
         ino = journal.identity(self.path)
         if ino != self.ino or self.size() < self.offset:   # the journal was started anew - read the new one from the start

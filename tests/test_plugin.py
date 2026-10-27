@@ -267,7 +267,7 @@ class Cli(Base):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             cli.main(["status"])
-        self.assertIn("open in Telegram: a #1 One", buf.getvalue())
+        self.assertIn("open session post: a #1 One", buf.getvalue())
         self.assertIn("in the queue: 1\n  a #2 Two", buf.getvalue())
         cli.main(["clear"])
         self.assertEqual(self.inbox(), [{"op": "clear"}])
@@ -401,15 +401,15 @@ class Process(Base):
         self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "like"}),
                                            ("/api/decide", {"id": "b", "verdict": "reject"})])
 
-    def test_session_post_goes_before_waiting_deck_cards_but_not_over_the_open_one(self):
+    def test_session_post_goes_at_once_even_with_a_deck_card_open_and_the_next_one_waits_for_it(self):
         p = self.plugin()
         self.queue(self.card("a"), self.card("b"), self.card("c"))
         p.poll()
         self.assertEqual([x["ref"] for x in self.posts()], ["a"])
-        self.queue(self.draft(1), self.draft(2))   # a news post from a session while deck cards wait
+        self.queue(self.draft(1), self.draft(2))   # a news post from a session while the deck card hangs
         p.poll()
-        self.assertEqual(self.posts(), [])   # a is still open
-        for ref, want in (("a", "d.md #1 Post"), ("d.md #1 Post", "d.md #2 Post"), ("d.md #2 Post", "b")):
+        self.assertEqual([x["ref"] for x in self.posts()], ["d.md #1 Post"])   # at once, the card stays open; the second post waits for the first
+        for ref, want in (("d.md #1 Post", "d.md #2 Post"), ("a", "b")):
             self.press(ref, "❤️")
             p.poll()
             self.assertEqual([x["ref"] for x in self.posts()], [want])
@@ -825,7 +825,7 @@ class Process(Base):
         p.poll()
         (two,) = self.posts()
         self.assertEqual(two["ref"], "d.md #2 Post")
-        self.assertEqual(p.st["open"]["img"], "ddd")
+        self.assertEqual(p.st["open_drafts"]["img"], "ddd")
 
     def test_text_edit_without_image_keeps_the_picture_and_its_print(self):
         p = self.plugin()
@@ -836,7 +836,7 @@ class Process(Base):
         p.poll()
         self.press("d.md #1 Post", "❤️")
         p.poll()
-        self.assertEqual((p.st["open"]["path"], p.st["open"]["img"]), ("/w/2.png", "bbb"))
+        self.assertEqual((p.st["open_drafts"]["path"], p.st["open_drafts"]["img"]), ("/w/2.png", "bbb"))
 
     def test_old_item_without_print_is_replaced_by_one_with_it(self):
         p = self.plugin()
@@ -864,7 +864,7 @@ class Process(Base):
         p.poll()
         self.assertEqual([x["ref"] for x in self.posts()], ["d.md #2 Post"])
         self.assertEqual([o["ref"] for o in p.st["revising"].values()], ["d.md #1 Post"])
-        self.assertEqual(p.st["open"]["ref"], "d.md #2 Post")
+        self.assertEqual(p.st["open_drafts"]["ref"], "d.md #2 Post")
         self.assertEqual([x["ref"] for x in p.st["posts"]], ["d.md #3 Post"])
         self.reply("d.md #1 Post")   # a second reply to the same one moves nothing
         p.poll()
@@ -886,7 +886,7 @@ class Process(Base):
         self.taken()
         self.reply("d.md #1 Post")
         p.poll()
-        self.assertEqual((self.taken(), p.st["open"]), ([], None))
+        self.assertEqual((self.taken(), p.st["open_drafts"]), ([], None))
         self.queue(self.draft(1, text="1. Post\n\nshort"))
         p.poll()
         (v2,) = self.posts()
@@ -904,7 +904,7 @@ class Process(Base):
         self.queue(self.draft(1, text="1. Post\n\nshort"))
         p.poll()
         self.assertEqual(self.posts(), [])   # #2 is open - it is not displaced
-        self.assertEqual((p.st["open"]["ref"], [x["ref"] for x in p.st["posts"]], p.st["revising"]),
+        self.assertEqual((p.st["open_drafts"]["ref"], [x["ref"] for x in p.st["posts"]], p.st["revising"]),
                          ("d.md #2 Post", ["d.md #1 Post", "d.md #3 Post"], {}))
         self.press("d.md #2 Post", "❤️")
         p.poll()
@@ -919,11 +919,11 @@ class Process(Base):
         self.queue(self.draft(1, text="1. Post\n\nshort"))
         self.press("d.md #2 Post", "❤️")
         p.poll()
-        self.assertEqual(p.st["open"]["ref"], "d.md #1 Post (v2)")
+        self.assertEqual(p.st["open_drafts"]["ref"], "d.md #1 Post (v2)")
         self.taken()
         self.reply("d.md #1 Post (v2)")
         p.poll()
-        self.assertEqual((p.st["open"], [o["ref"] for o in p.st["revising"].values()]), (None, ["d.md #1 Post (v2)"]))
+        self.assertEqual((p.st["open_drafts"], [o["ref"] for o in p.st["revising"].values()]), (None, ["d.md #1 Post (v2)"]))
 
     def test_same_text_again_for_a_revised_post_is_not_a_new_version(self):
         p = self.plugin()
@@ -960,7 +960,7 @@ class Process(Base):
         self.assertIn("rejected outright", msg["data"]["text"])
         self.assertIn("1", msg["data"]["text"])
         self.assertEqual([e for e in got if e["type"] == "telegram.post" and not e["data"]["ref"].startswith("why:")], [])
-        self.assertEqual((p.st["revising"], p.st["open"]["ref"], len(p.st["posts"])), ({}, "d.md #2 Post", 1))
+        self.assertEqual((p.st["revising"], p.st["open_drafts"]["ref"], len(p.st["posts"])), ({}, "d.md #2 Post", 1))
 
     def test_button_under_the_old_version_after_the_new_one_is_queued_counts_for_nothing(self):
         p = self.plugin()
@@ -974,7 +974,7 @@ class Process(Base):
         self.press("d.md #1 Post", "❤️")
         p.poll()
         self.assertEqual(self.taken(), [])
-        self.assertEqual(p.st["open"]["ref"], "d.md #2 Post")
+        self.assertEqual(p.st["open_drafts"]["ref"], "d.md #2 Post")
 
     def test_reply_to_a_post_that_is_not_open_moves_nothing(self):
         p = self.plugin()
@@ -988,7 +988,7 @@ class Process(Base):
         self.j.append("message.received", None, {
             "text": REPLY_NOTE.format(ref="d.md #1 Post", file="/w/d.md"), "to": "smm"}, src="web")   # not from Telegram
         p.poll()
-        self.assertEqual((self.taken(), p.st["revising"], p.st["open"]["ref"]), ([], {}, "d.md #1 Post"))
+        self.assertEqual((self.taken(), p.st["revising"], p.st["open_drafts"]["ref"]), ([], {}, "d.md #1 Post"))
 
     def test_reply_to_a_deck_card_still_only_goes_to_the_deck(self):
         p = self.plugin()
@@ -1015,7 +1015,7 @@ class Process(Base):
         p.poll()
         cli.put(self.dir, {"op": "clear"})
         p.poll()
-        self.assertEqual((p.st["revising"], p.st["open"], p.st["posts"]), ({}, None, []))
+        self.assertEqual((p.st["revising"], p.st["open_drafts"], p.st["posts"]), ({}, None, []))
 
     def test_state_survives_restart_without_resending(self):
         self.queue(self.draft(1), self.draft(2))
@@ -1040,7 +1040,7 @@ class Process(Base):
         self.press("d.md #1 Post", "❤️")
         p.poll()
         self.assertEqual(self.taken(), [])
-        self.assertEqual((p.st["open"], p.st["posts"]), (None, []))
+        self.assertEqual((p.st["open_drafts"], p.st["posts"]), (None, []))
 
     def test_same_deck_card_is_not_queued_twice_even_while_its_rating_is_pending(self):
         p = self.plugin()
@@ -1508,7 +1508,7 @@ class Process(Base):
         (again,) = self.posts()
         self.assertEqual((again["ref"], again["path"], again["session"], again["text"]),
                          ("d.md #1 Post (v2)", "/w/p.png", "smm", "1. Post\n\nnew"))
-        self.assertEqual((p.st["open"]["ref"], p.st["revs"]["/w/d.md#1"]), ("d.md #1 Post (v2)", 2))
+        self.assertEqual((p.st["open_drafts"]["ref"], p.st["revs"]["/w/d.md#1"]), ("d.md #1 Post (v2)", 2))
 
     def test_again_does_not_count_as_the_same_version_nothing(self):
         # the same version from drafts/deck - "no changes", while again always goes to Telegram
@@ -1599,6 +1599,162 @@ class Process(Base):
         (alone,) = self.posts()
         self.assertEqual((alone["ref"], alone["text"]), ("gone", "gone\n\nunknown card"))
         self.assertIn("empty", self.exit_text(lambda: self.answer("a", "  ")))
+
+    # --- two slots (0.13.0): a deck card and a session's post hang in Telegram independently
+
+    def test_session_post_goes_at_once_while_a_deck_card_is_open(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["a"])
+        self.queue(self.draft(1))
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["d.md #1 Post"])   # the open card does not hold it
+        self.assertEqual((p.st["open"]["ref"], p.st["open_drafts"]["ref"], [x["ref"] for x in p.st["posts"]]),
+                         ("a", "d.md #1 Post", ["b"]))
+        p.poll()
+        self.assertEqual(self.posts(), [])   # a card still goes one at a time
+
+    def test_deck_card_goes_at_once_while_a_session_post_is_open(self):
+        p = self.plugin()
+        self.queue(self.draft(1))
+        p.poll()
+        self.taken()
+        self.queue(self.card("a"), self.card("b"))
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["a"])   # the open post does not hold the deck
+        self.assertEqual((p.st["open"]["ref"], p.st["open_drafts"]["ref"]), ("a", "d.md #1 Post"))
+
+    def test_second_session_post_waits_for_the_first_and_each_answer_closes_its_own(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.draft(1), self.draft(2))
+        p.poll()
+        self.assertEqual(sorted(x["ref"] for x in self.posts()), ["a", "d.md #1 Post"])
+        self.assertEqual([x["ref"] for x in p.st["posts"]], ["d.md #2 Post", "b"])
+        p.poll()
+        self.assertEqual(self.posts(), [])   # both slots are busy
+        self.press("d.md #1 Post", "❤️")
+        p.poll()
+        got = self.taken()
+        self.assertEqual([e["data"]["ref"] for e in got if e["type"] == "telegram.post"], ["d.md #2 Post"])   # only the session slot moves
+        self.assertEqual(p.st["open"]["ref"], "a")
+        self.assertEqual(self.deck.calls, [])
+        self.assertEqual(len([e for e in got if e["type"] == "message.received"]), 1)
+        self.press("a", "❤️")
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["b"])   # only the deck slot moves
+        self.assertEqual(self.deck.calls, [("/api/decide", {"id": "a", "verdict": "like"})])
+        self.assertEqual(p.st["open_drafts"]["ref"], "d.md #2 Post")
+
+    def test_reply_to_the_open_session_post_does_not_touch_the_open_card(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.draft(1), self.draft(2))
+        p.poll()
+        self.taken()
+        self.reply("d.md #1 Post")
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["d.md #2 Post"])   # revision frees the session slot
+        self.assertEqual((p.st["open"]["ref"], list(p.st["revising"])), ("a", ["/w/d.md#1"]))
+        self.assertEqual(self.deck.calls, [])
+
+    def test_reply_to_the_open_card_does_not_touch_the_open_session_post(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.card("b"), self.draft(1))
+        p.poll()
+        self.taken()
+        self.reply_to_card("a")
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["b"])
+        self.assertEqual((p.st["open"]["ref"], p.st["open_drafts"]["ref"]), ("b", "d.md #1 Post"))
+
+    def test_new_version_of_the_open_session_post_replaces_it_in_its_own_slot(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.draft(1))
+        p.poll()
+        self.taken()
+        self.queue(self.draft(1, text="1. Post\n\nshort"))
+        p.poll()
+        (v2,) = self.posts()
+        self.assertEqual((v2["ref"], p.st["open"]["ref"]), ("d.md #1 Post (v2)", "a"))
+
+    def test_clear_and_close_reach_both_slots(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.draft(1))
+        p.poll()
+        self.taken()
+        cli.put(self.dir, {"op": "close", "ref": "d.md #1 Post"})
+        p.poll()
+        self.assertEqual((p.st["open"]["ref"], p.st["open_drafts"]), ("a", None))
+        self.queue(self.draft(2))
+        p.poll()
+        self.taken()
+        cli.put(self.dir, {"op": "clear"})
+        p.poll()
+        self.assertEqual((p.st["open"], p.st["open_drafts"], p.st["posts"]), (None, None, []))
+
+    def test_again_without_a_ref_reminds_about_both_open_posts_and_with_a_ref_about_one(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.draft(1))
+        p.poll()
+        self.taken()
+        self.assertTrue(p.again("d.md #1 Post"))
+        self.assertEqual([x["ref"] for x in self.posts()], ["d.md #1 Post"])
+        self.assertTrue(p.again(""))
+        self.assertEqual(sorted(x["ref"] for x in self.posts()), ["a", "d.md #1 Post"])
+
+    def test_answer_finds_a_post_in_either_slot(self):
+        p = self.plugin()
+        self.queue(self.card("a"), self.draft(1))
+        p.poll()
+        self.taken()
+        p.answer("d.md #1 Post", "ok")
+        (x,) = self.posts()
+        self.assertEqual((x["ref"], x["text"].splitlines()[0]), ("d.md #1 Post", "1. Post"))
+
+    def test_deck_silent_does_not_hold_a_session_post(self):
+        p = self.plugin()
+        self.deck.silent = True
+        self.queue(self.card("a"), self.draft(1))
+        p.poll()
+        self.assertEqual([x["ref"] for x in self.posts()], ["d.md #1 Post"])
+        self.assertEqual([x["ref"] for x in p.st["posts"]], ["a"])
+
+    def test_old_state_open_session_post_moves_to_the_session_slot_and_a_card_stays(self):
+        os.makedirs(os.path.join(self.dir, "tg-posts"))
+        post = {**self.draft(1), "ref": "d.md #1 Post", "at": 1.0}
+        for old, deck_open, drafts_open in (({"open": post}, None, "d.md #1 Post"),
+                                            ({"open": self.card("a")}, "a", None),
+                                            ({"open": None}, None, None), ({}, None, None)):
+            with open(os.path.join(self.dir, "tg-posts", "state.json"), "w", encoding="utf-8") as f:
+                json.dump({"seq": 0, "posts": [], **old}, f)
+            p = self.plugin()
+            got = (p.st["open"] and p.st["open"]["ref"], p.st["open_drafts"] and p.st["open_drafts"]["ref"])
+            self.assertEqual(got, (deck_open, drafts_open), old)
+        # a migrated open post is still answered: a press closes it in its own slot
+        with open(os.path.join(self.dir, "tg-posts", "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"seq": 0, "posts": [], "open": post, "sent": {"d.md #1 Post": {"kind": "drafts", "key": post["key"]}}}, f)
+        p = self.plugin()
+        self.press("d.md #1 Post", "❤️")
+        p.poll()
+        self.assertEqual(p.st["open_drafts"], None)
+        self.assertEqual(len(self.session_said()), 1)
+
+    def test_status_and_again_cli_see_both_slots(self):
+        os.makedirs(os.path.join(self.dir, "tg-posts"))
+        with open(os.path.join(self.dir, "tg-posts", "state.json"), "w", encoding="utf-8") as f:
+            json.dump({"open": {"ref": "a", "key": "a", "kind": "deck", "at": 1000.0},
+                       "open_drafts": {"ref": "d.md #1 Post", "key": "/w/d.md#1", "kind": "drafts", "at": 1000.0},
+                       "posts": [], "jobs": []}, f)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.main(["status"])
+        self.assertIn("open in Telegram: a", buf.getvalue())
+        self.assertIn("open session post: d.md #1 Post", buf.getvalue())
+        self.assertIn("d.md #1 Post", self.again("d.md #1 Post"))
+        self.assertIn("a: sending", self.again("a"))
+        self.assertIn("is not open", self.again("zzz"))
+        self.assertEqual(len(self.inbox_names()), 2)
+        self.assertEqual(cli.verdicts(self.dir, [{"kind": "drafts", "key": "/w/d.md#1", "text": "x"}]), ["revised"])
 
     def exit_text(self, fn):
         try:

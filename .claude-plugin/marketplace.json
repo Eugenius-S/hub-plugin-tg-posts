@@ -2,6 +2,6 @@
   "name": "hub-plugin-tg-posts",
   "owner": {"name": "Eugenius-S"},
   "plugins": [
-    {"name": "tg-posts", "source": "./plugins/tg-posts", "description": "Posts to the owner in Telegram one at a time: a queue, one unreviewed post in the chat, ❤️ 👎 buttons (approve / reject), a reply is a revision, the next post goes out at once; deck cards with ratings and revision.", "version": "0.12.2"}
+    {"name": "tg-posts", "source": "./plugins/tg-posts", "description": "Posts to the owner in Telegram: a queue, two places in the chat (one deck card and one session post, each one at a time), ❤️ 👎 buttons (approve / reject), a reply is a revision, the next post goes out at once; deck cards with ratings and revision.", "version": "0.13.0"}
   ]
 }

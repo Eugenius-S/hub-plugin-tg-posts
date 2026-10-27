@@ -1,1 +1,1 @@
-{"name": "tg-posts", "version": "0.12.2", "description": "Posts to the owner in Telegram one at a time: a queue, one unreviewed post in the chat, ❤️ 👎 buttons (approve / reject), a reply is a revision, the next post goes out at once; deck cards with ratings and revision."}
+{"name": "tg-posts", "version": "0.13.0", "description": "Posts to the owner in Telegram: a queue, two places in the chat (one deck card and one session post, each one at a time), ❤️ 👎 buttons (approve / reject), a reply is a revision, the next post goes out at once; deck cards with ratings and revision."}
