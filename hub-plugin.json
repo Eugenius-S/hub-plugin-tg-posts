@@ -1,10 +1,10 @@
 {
   "name": "tg-posts",
   "icon": "icon.png",
-  "description": "Posts to the owner in Telegram: a queue and two places in the chat - one deck card and one session post, each one at a time (a session post does not wait for a card); the next one comes after a ❤️ or 👎 or a reply; a reply is a revision (it goes to the session, the next post goes out at once, the new version stands first in the queue); deck cards work the same way: a reply is a revision on the deck server, the edited card comes back first; the plugin passes the card ratings to the deck server itself",
-  "why": "Review post variants one at a time from a phone: ❤️ approve, 👎 reject, a reply to revise - the next one comes at once, and the new version stands first in the queue",
-  "version": "0.14.0",
-  "i18n": {"ru": {"description": "Посты владельцу в Telegram: очередь и два места в чате — одна карточка колоды и один пост сессии, каждый по одному (пост сессии не ждёт карточку); следующий — после ❤️ или 👎 или реплая; реплай — докрутка (идёт сессии, следующий пост уходит сразу, новая версия встаёт в очереди первой); у карточек колоды то же: реплай — докрутка на сервере колоды, правленая карточка возвращается первой; оценку карточек плагин сам отдаёт серверу колоды", "why": "Разобрать варианты постов с телефона по одному: ❤️ принять, 👎 слить, реплаем докрутить — следующий придёт сразу, а новая версия встанет в очереди первой"}},
+  "description": "Posts for you in Telegram, one at a time: a card from the deck and a post from an agent, each in its own place in the chat. The next one comes after ❤️, 👎 or a reply. A reply sends the post back for revision, and the new version goes first in the queue.",
+  "why": "Review post variants one at a time from a phone: ❤️ approve, 👎 reject, a reply to revise. The next one comes at once, and the new version stands first in the queue",
+  "version": "0.14.1",
+  "i18n": {"ru": {"description": "Посты вам в Telegram по одному: карточка колоды и пост от агента, у каждого своё место в чате. Следующий приходит после ❤️, 👎 или ответа. Ответ отправляет пост на доработку, и новая версия встаёт в очереди первой.", "why": "Разобрать варианты постов с телефона по одному: ❤️ принять, 👎 отклонить, ответом доработать. Следующий придёт сразу, а новая версия встанет в очереди первой"}},
   "hub": "^1.15",
   "run": ["python3", "main.py"],
   "skills": true

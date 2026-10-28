@@ -65,7 +65,7 @@ REPLY_FILE = ", " + _cp(0x444, 0x430, 0x439, 0x43b) + " `"
 
 STR = {
     "en": {
-        "why_ask": "Why 👎? Press a button - or reply in your own words.",
+        "why_ask": "Why 👎? Press a button or reply in your own words.",
         "why_settle": "Why: {}",
         "why_deck_stale": "Stale",
         "why_deck_off-brand": "Not our voice",
@@ -82,7 +82,7 @@ STR = {
         "why_drafts_off-tone": "Not our tone",
     },
     "ru": {
-        "why_ask": "Почему 👎? Кнопка — или реплаем своими словами.",
+        "why_ask": "Почему 👎? Нажмите кнопку или ответьте своими словами.",
         "why_settle": "Почему: {}",
         "why_deck_stale": "Баян",
         "why_deck_off-brand": "Не наш голос",

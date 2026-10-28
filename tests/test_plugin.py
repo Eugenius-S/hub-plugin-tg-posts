@@ -1256,9 +1256,9 @@ class Process(Base):
             p.poll()
         deck_why, drafts_why = self.whys()
         self.assertEqual((deck_why["text"], deck_why["settle"], deck_why["buttons"]),
-                         ("Почему 👎? Кнопка — или реплаем своими словами.", "Почему: {}", self.RU_DECK_WHY))
+                         ("Почему 👎? Нажмите кнопку или ответьте своими словами.", "Почему: {}", self.RU_DECK_WHY))
         self.assertEqual((drafts_why["text"], drafts_why["settle"], drafts_why["buttons"]),
-                         ("Почему 👎? Кнопка — или реплаем своими словами.", "Почему: {}", self.RU_DRAFTS_WHY))
+                         ("Почему 👎? Нажмите кнопку или ответьте своими словами.", "Почему: {}", self.RU_DRAFTS_WHY))
 
     def test_the_why_question_is_english_by_default_and_for_a_language_without_a_table(self):
         p = self.plugin()
@@ -1269,12 +1269,12 @@ class Process(Base):
         p.poll()
         (why,) = self.whys()
         self.assertEqual((why["text"], why["settle"], why["buttons"]),
-                         ("Why 👎? Press a button - or reply in your own words.", "Why: {}", self.DECK_WHY))
+                         ("Why 👎? Press a button or reply in your own words.", "Why: {}", self.DECK_WHY))
         with self.speaking("de"):
             self.press("b", "👎")
             p.poll()
         (why,) = self.whys()
-        self.assertEqual((why["text"], why["buttons"]), ("Why 👎? Press a button - or reply in your own words.", self.DECK_WHY))
+        self.assertEqual((why["text"], why["buttons"]), ("Why 👎? Press a button or reply in your own words.", self.DECK_WHY))
         with self.speaking("ru-RU"):   # a regional variant of a known language
             self.assertEqual(main.tr(main._lang(), "why_settle"), "Почему: {}")
 
